@@ -47,5 +47,6 @@ dependencies {
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.room:room-testing:2.7.1")
+    androidTestImplementation("io.ktor:ktor-client-mock:3.1.3")
 }
 android.sourceSets.getByName("androidTest").assets.srcDir("src/test/resources")

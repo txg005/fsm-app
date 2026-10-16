@@ -35,6 +35,7 @@ data class Operation(@PrimaryKey val id: String, val kind: String, val workOrder
     @Query("SELECT * FROM photos WHERE id=:id") suspend fun photo(id:String): Photo?
     @Query("SELECT * FROM outbox ORDER BY sequence") suspend fun operations(): List<Operation>
     @Query("SELECT * FROM server_shadow WHERE id=:id") suspend fun shadow(id:String): Shadow?
+    @Query("DELETE FROM server_shadow WHERE id=:id") suspend fun deleteShadow(id:String)
     @Upsert suspend fun employee(x:Employee)
     @Upsert suspend fun site(x:Site)
     @Upsert suspend fun equipment(x:Equipment)
@@ -51,7 +52,7 @@ data class Operation(@PrimaryKey val id: String, val kind: String, val workOrder
     @Query("DELETE FROM photos WHERE id=:id") suspend fun deletePhoto(id:String)
     @Query("DELETE FROM outbox WHERE workOrderId=:id") suspend fun deleteOperations(id:String)
     @Query("DELETE FROM work_orders WHERE id=:id") suspend fun deleteOrder(id:String)
-    @Query("UPDATE outbox SET state='PENDING' WHERE state='RUNNING'") suspend fun recover()
+    @Query("UPDATE outbox SET state='RETRY_WAIT',error='UNKNOWN_OUTCOME',attempts=attempts+1,nextAttemptAt=MAX(nextAttemptAt,:retryAt) WHERE state='RUNNING'") suspend fun recover(retryAt:Long=System.currentTimeMillis()+2000)
     @Query("UPDATE outbox SET state='PENDING',nextAttemptAt=0 WHERE state='AUTH_REQUIRED'") suspend fun resumeAuth()
 }
 @Database(entities=[Employee::class,Site::class,Equipment::class,WorkOrder::class,ChecklistItem::class,InspectionResult::class,Photo::class,Operation::class,AppLog::class,Shadow::class,SyncState::class],version=1,exportSchema=true)

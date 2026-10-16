@@ -12,6 +12,12 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.*
 import java.util.Locale
 
+// Only dispatch/response handling uses this wrapper. Local preparation errors stay definitive.
+class UnknownOutcome:java.io.IOException("UNKNOWN_OUTCOME")
+suspend fun <T> uncertainMutation(block:suspend ()->T):T = try { block() }
+catch(e:kotlinx.coroutines.CancellationException) { throw e }
+catch(e:ApiFailure) { throw e }
+catch(_:Exception) { throw UnknownOutcome() }
 class ApiFailure(val status: Int, val code: String, val retryAfter: Long=0): Exception(code)
 interface RefreshStore { fun read(): String?; fun write(token:String) }
 class Api(private val client: HttpClient, private val origin: String, private val tokens: RefreshStore?, private val accountId:String?) {
@@ -56,13 +62,27 @@ class Api(private val client: HttpClient, private val origin: String, private va
     }
     suspend fun snapshot():SnapshotDto = wire.decodeFromString(checked(authorized("/api/v1/sync/snapshot")))
     suspend fun order(id:String):WorkOrderDto = wire.decodeFromString(checked(authorized("/api/v1/work-orders/$id")))
-    suspend fun close(id:String,key:String,bytes:String):CloseReceipt = wire.decodeFromString(checked(authorized("/api/v1/work-orders/$id/close",HttpMethod.Post,bytes,key)))
+    suspend fun close(id:String,key:String,bytes:String):CloseReceipt {
+        val expected=wire.decodeFromString<CloseRequest>(bytes) // Before dispatch.
+        return uncertainMutation {
+            val receipt=wire.decodeFromString<CloseReceipt>(checked(authorized("/api/v1/work-orders/$id/close",HttpMethod.Post,bytes,key)))
+            check(receipt.operationId==key && receipt.workOrder.id==id && receipt.workOrder.status=="CLOSED" &&
+                receipt.workOrder.result?.id==expected.result.id && receipt.workOrder.revision>expected.baseRevision &&
+                (accountId==null || receipt.workOrder.assigneeId==accountId))
+            receipt
+        }
+    }
     suspend fun upload(id:String,key:String,meta:PhotoUploadMetadata,bytes:ByteArray):PhotoUploadReceipt {
         val parts=MultiPartFormDataContent(formData {
             append("metadata",wire.encodeToString(meta),Headers.build { append(HttpHeaders.ContentType,"application/json") })
             append("file",bytes,Headers.build { append(HttpHeaders.ContentType,"image/jpeg"); append(HttpHeaders.ContentDisposition,"filename=\"photo.jpg\"") })
         })
-        return wire.decodeFromString(checked(authorized("/api/v1/work-orders/$id/photos",HttpMethod.Post,key=key,multipart=parts)))
+        return uncertainMutation {
+            val receipt=wire.decodeFromString<PhotoUploadReceipt>(checked(authorized("/api/v1/work-orders/$id/photos",HttpMethod.Post,key=key,multipart=parts)))
+            check(receipt.operationId==key && receipt.photo.id==meta.photoId && receipt.photo.mimeType==meta.mimeType &&
+                receipt.photo.byteSize==meta.byteSize && receipt.photo.sha256==meta.sha256 && validContentPath(receipt.photo))
+            receipt
+        }
     }
     suspend fun photo(photo:PhotoDto):ByteArray {
         require(validContentPath(photo))
