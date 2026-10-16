@@ -1,0 +1,604 @@
+{
+  "contractVersion": "1.0",
+  "fixtureNotes": [
+    "Examples are not deployed accounts or usable tokens. Login examples must be injected into isolated test seeds, never production.",
+    "Request/response fields below are HTTP example wrappers, not wire DTO fields. closeExactBodyUtf8 is authoritative bytes for its semantic hash.",
+    "jpegBase64 and multipartBodyBase64 contain the same real generated 8x8 JPEG. GPS captured example is synthetic.",
+    "Alternative closeNoPhotoRequest is tested in a fresh database/order, not after successful closeRequest."
+  ],
+  "ids": {
+    "employee": "10000000-0000-4000-8000-000000000001",
+    "site": "10000000-0000-4000-8000-000000000002",
+    "equipment": "10000000-0000-4000-8000-000000000003",
+    "workOrder": "10000000-0000-4000-8000-000000000004",
+    "checklistItem": "10000000-0000-4000-8000-000000000005",
+    "result": "10000000-0000-4000-8000-000000000006",
+    "photo": "10000000-0000-4000-8000-000000000007",
+    "serverPhoto": "10000000-0000-4000-8000-000000000008",
+    "uploadOperation": "10000000-0000-4000-8000-000000000009",
+    "closeOperation": "10000000-0000-4000-8000-000000000010",
+    "request": "10000000-0000-4000-8000-000000000011",
+    "log": "10000000-0000-4000-8000-000000000012"
+  },
+  "auth": {
+    "loginRequest": {
+      "login": "engineer.demo",
+      "password": "EXAMPLE_NOT_A_REAL_PASSWORD"
+    },
+    "refreshRequest": {
+      "refreshToken": "EXAMPLE_NOT_A_REAL_REFRESH_TOKEN"
+    },
+    "tokenResponse": {
+      "accessToken": "EXAMPLE_NOT_A_VALID_JWT",
+      "accessExpiresAt": "2026-10-16T17:15:00.000Z",
+      "refreshToken": "EXAMPLE_NOT_A_REAL_REFRESH_TOKEN",
+      "refreshExpiresAt": "2026-11-15T17:00:00.000Z",
+      "employee": {
+        "id": "10000000-0000-4000-8000-000000000001",
+        "displayName": "Демо инженер",
+        "login": "engineer.demo"
+      }
+    }
+  },
+  "referenceDataResponse": {
+    "employee": {
+      "id": "10000000-0000-4000-8000-000000000001",
+      "displayName": "Демо инженер",
+      "login": "engineer.demo"
+    },
+    "sites": [
+      {
+        "id": "10000000-0000-4000-8000-000000000002",
+        "name": "Демо объект",
+        "address": "Демонстрационный адрес"
+      }
+    ],
+    "equipment": [
+      {
+        "id": "10000000-0000-4000-8000-000000000003",
+        "siteId": "10000000-0000-4000-8000-000000000002",
+        "name": "Насос",
+        "inventoryNumber": "DEMO-001"
+      }
+    ]
+  },
+  "workOrderListResponse": {
+    "items": [
+      {
+        "id": "10000000-0000-4000-8000-000000000004",
+        "equipmentId": "10000000-0000-4000-8000-000000000003",
+        "assigneeId": "10000000-0000-4000-8000-000000000001",
+        "title": "Осмотр насоса",
+        "description": "Проверить оборудование",
+        "dueAt": null,
+        "status": "ASSIGNED",
+        "revision": 1,
+        "checklistItems": [
+          {
+            "id": "10000000-0000-4000-8000-000000000005",
+            "position": 0,
+            "text": "Внешний осмотр выполнен",
+            "required": true
+          }
+        ],
+        "measurementSpecs": [
+          {
+            "key": "pressure",
+            "label": "Давление",
+            "unit": "bar",
+            "required": true,
+            "min": "0",
+            "max": "10"
+          }
+        ],
+        "result": null
+      }
+    ]
+  },
+  "workOrderResponse": {
+    "id": "10000000-0000-4000-8000-000000000004",
+    "equipmentId": "10000000-0000-4000-8000-000000000003",
+    "assigneeId": "10000000-0000-4000-8000-000000000001",
+    "title": "Осмотр насоса",
+    "description": "Проверить оборудование",
+    "dueAt": null,
+    "status": "ASSIGNED",
+    "revision": 1,
+    "checklistItems": [
+      {
+        "id": "10000000-0000-4000-8000-000000000005",
+        "position": 0,
+        "text": "Внешний осмотр выполнен",
+        "required": true
+      }
+    ],
+    "measurementSpecs": [
+      {
+        "key": "pressure",
+        "label": "Давление",
+        "unit": "bar",
+        "required": true,
+        "min": "0",
+        "max": "10"
+      }
+    ],
+    "result": null
+  },
+  "snapshotBeforeClose": {
+    "generatedAt": "2026-10-16T17:00:00.000Z",
+    "employee": {
+      "id": "10000000-0000-4000-8000-000000000001",
+      "displayName": "Демо инженер",
+      "login": "engineer.demo"
+    },
+    "sites": [
+      {
+        "id": "10000000-0000-4000-8000-000000000002",
+        "name": "Демо объект",
+        "address": "Демонстрационный адрес"
+      }
+    ],
+    "equipment": [
+      {
+        "id": "10000000-0000-4000-8000-000000000003",
+        "siteId": "10000000-0000-4000-8000-000000000002",
+        "name": "Насос",
+        "inventoryNumber": "DEMO-001"
+      }
+    ],
+    "workOrders": [
+      {
+        "id": "10000000-0000-4000-8000-000000000004",
+        "equipmentId": "10000000-0000-4000-8000-000000000003",
+        "assigneeId": "10000000-0000-4000-8000-000000000001",
+        "title": "Осмотр насоса",
+        "description": "Проверить оборудование",
+        "dueAt": null,
+        "status": "ASSIGNED",
+        "revision": 1,
+        "checklistItems": [
+          {
+            "id": "10000000-0000-4000-8000-000000000005",
+            "position": 0,
+            "text": "Внешний осмотр выполнен",
+            "required": true
+          }
+        ],
+        "measurementSpecs": [
+          {
+            "key": "pressure",
+            "label": "Давление",
+            "unit": "bar",
+            "required": true,
+            "min": "0",
+            "max": "10"
+          }
+        ],
+        "result": null
+      }
+    ]
+  },
+  "photoUpload": {
+    "method": "POST",
+    "path": "/api/v1/work-orders/10000000-0000-4000-8000-000000000004/photos",
+    "headers": {
+      "Idempotency-Key": "10000000-0000-4000-8000-000000000009",
+      "Content-Type": "multipart/form-data; boundary=FSMFixtureBoundaryV1"
+    },
+    "metadata": {
+      "photoId": "10000000-0000-4000-8000-000000000007",
+      "mimeType": "image/jpeg",
+      "byteSize": 631,
+      "sha256": "4a0043beb47e76e4bf6a12e9d93832dc69d596c8d1b114870e17f9d1420d61bf"
+    },
+    "jpegBase64": "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAAIAAgDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD3+iiigD//2Q==",
+    "multipartBodyBase64": "LS1GU01GaXh0dXJlQm91bmRhcnlWMQ0KQ29udGVudC1EaXNwb3NpdGlvbjogZm9ybS1kYXRhOyBuYW1lPSJtZXRhZGF0YSINCkNvbnRlbnQtVHlwZTogYXBwbGljYXRpb24vanNvbg0KDQp7InBob3RvSWQiOiIxMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDciLCJtaW1lVHlwZSI6ImltYWdlL2pwZWciLCJieXRlU2l6ZSI6NjMxLCJzaGEyNTYiOiI0YTAwNDNiZWI0N2U3NmU0YmY2YTEyZTlkOTM4MzJkYzY5ZDU5NmM4ZDFiMTE0ODcwZTE3ZjlkMTQyMGQ2MWJmIn0NCi0tRlNNRml4dHVyZUJvdW5kYXJ5VjENCkNvbnRlbnQtRGlzcG9zaXRpb246IGZvcm0tZGF0YTsgbmFtZT0iZmlsZSI7IGZpbGVuYW1lPSJwaG90by5qcGciDQpDb250ZW50LVR5cGU6IGltYWdlL2pwZWcNCg0K/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAAIAAgDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD3+iiigD//2Q0KLS1GU01GaXh0dXJlQm91bmRhcnlWMS0tDQo=",
+    "semanticHash": "75edec66ae5784c3fc202c3cf396c0cbf3efdf85bc05f1137ef0569de7b142e8",
+    "responseStatus": 201,
+    "response": {
+      "operationId": "10000000-0000-4000-8000-000000000009",
+      "photo": {
+        "id": "10000000-0000-4000-8000-000000000007",
+        "serverPhotoId": "10000000-0000-4000-8000-000000000008",
+        "mimeType": "image/jpeg",
+        "byteSize": 631,
+        "sha256": "4a0043beb47e76e4bf6a12e9d93832dc69d596c8d1b114870e17f9d1420d61bf",
+        "createdAt": "2026-10-16T17:00:00.000Z",
+        "contentPath": "/api/v1/photos/10000000-0000-4000-8000-000000000008/content"
+      }
+    }
+  },
+  "close": {
+    "method": "POST",
+    "path": "/api/v1/work-orders/10000000-0000-4000-8000-000000000004/close",
+    "headers": {
+      "Idempotency-Key": "10000000-0000-4000-8000-000000000010",
+      "Content-Type": "application/json"
+    },
+    "request": {
+      "baseRevision": 1,
+      "result": {
+        "id": "10000000-0000-4000-8000-000000000006",
+        "answers": [
+          {
+            "itemId": "10000000-0000-4000-8000-000000000005",
+            "checked": true
+          }
+        ],
+        "readings": [
+          {
+            "key": "pressure",
+            "value": "2.40"
+          }
+        ],
+        "comment": "Демонстрационный результат",
+        "location": {
+          "status": "MISSING",
+          "reason": "DENIED",
+          "latitude": null,
+          "longitude": null,
+          "accuracyMeters": null,
+          "capturedAt": null
+        },
+        "capturedAt": "2026-10-16T17:00:00.000Z",
+        "photoIds": [
+          "10000000-0000-4000-8000-000000000008"
+        ]
+      }
+    },
+    "closeExactBodyUtf8": "{\"baseRevision\":1,\"result\":{\"id\":\"10000000-0000-4000-8000-000000000006\",\"answers\":[{\"itemId\":\"10000000-0000-4000-8000-000000000005\",\"checked\":true}],\"readings\":[{\"key\":\"pressure\",\"value\":\"2.40\"}],\"comment\":\"Демонстрационный результат\",\"location\":{\"status\":\"MISSING\",\"reason\":\"DENIED\",\"latitude\":null,\"longitude\":null,\"accuracyMeters\":null,\"capturedAt\":null},\"capturedAt\":\"2026-10-16T17:00:00.000Z\",\"photoIds\":[\"10000000-0000-4000-8000-000000000008\"]}}",
+    "semanticHash": "b09abbffa2a76ba3c0a7766f8a5948c73085ae59f7555c4c64fed6c533008a0e",
+    "responseStatus": 200,
+    "response": {
+      "operationId": "10000000-0000-4000-8000-000000000010",
+      "workOrder": {
+        "id": "10000000-0000-4000-8000-000000000004",
+        "equipmentId": "10000000-0000-4000-8000-000000000003",
+        "assigneeId": "10000000-0000-4000-8000-000000000001",
+        "title": "Осмотр насоса",
+        "description": "Проверить оборудование",
+        "dueAt": null,
+        "status": "CLOSED",
+        "revision": 2,
+        "checklistItems": [
+          {
+            "id": "10000000-0000-4000-8000-000000000005",
+            "position": 0,
+            "text": "Внешний осмотр выполнен",
+            "required": true
+          }
+        ],
+        "measurementSpecs": [
+          {
+            "key": "pressure",
+            "label": "Давление",
+            "unit": "bar",
+            "required": true,
+            "min": "0",
+            "max": "10"
+          }
+        ],
+        "result": {
+          "id": "10000000-0000-4000-8000-000000000006",
+          "answers": [
+            {
+              "itemId": "10000000-0000-4000-8000-000000000005",
+              "checked": true
+            }
+          ],
+          "readings": [
+            {
+              "key": "pressure",
+              "value": "2.40"
+            }
+          ],
+          "comment": "Демонстрационный результат",
+          "location": {
+            "status": "MISSING",
+            "reason": "DENIED",
+            "latitude": null,
+            "longitude": null,
+            "accuracyMeters": null,
+            "capturedAt": null
+          },
+          "capturedAt": "2026-10-16T17:00:00.000Z",
+          "photos": [
+            {
+              "id": "10000000-0000-4000-8000-000000000007",
+              "serverPhotoId": "10000000-0000-4000-8000-000000000008",
+              "mimeType": "image/jpeg",
+              "byteSize": 631,
+              "sha256": "4a0043beb47e76e4bf6a12e9d93832dc69d596c8d1b114870e17f9d1420d61bf",
+              "createdAt": "2026-10-16T17:00:00.000Z",
+              "contentPath": "/api/v1/photos/10000000-0000-4000-8000-000000000008/content"
+            }
+          ]
+        }
+      }
+    }
+  },
+  "closeNoPhotoRequest": {
+    "baseRevision": 1,
+    "result": {
+      "id": "10000000-0000-4000-8000-000000000006",
+      "answers": [
+        {
+          "itemId": "10000000-0000-4000-8000-000000000005",
+          "checked": true
+        }
+      ],
+      "readings": [
+        {
+          "key": "pressure",
+          "value": "2.40"
+        }
+      ],
+      "comment": "Демонстрационный результат",
+      "location": {
+        "status": "MISSING",
+        "reason": "DENIED",
+        "latitude": null,
+        "longitude": null,
+        "accuracyMeters": null,
+        "capturedAt": null
+      },
+      "capturedAt": "2026-10-16T17:00:00.000Z",
+      "photoIds": []
+    }
+  },
+  "capturedLocationExample": {
+    "status": "CAPTURED",
+    "reason": null,
+    "latitude": 55.75,
+    "longitude": 37.62,
+    "accuracyMeters": 18.0,
+    "capturedAt": "2026-10-16T17:00:00.000Z"
+  },
+  "missingLocationExamples": [
+    {
+      "status": "MISSING",
+      "reason": "DENIED",
+      "latitude": null,
+      "longitude": null,
+      "accuracyMeters": null,
+      "capturedAt": null
+    },
+    {
+      "status": "MISSING",
+      "reason": "TIMEOUT",
+      "latitude": null,
+      "longitude": null,
+      "accuracyMeters": null,
+      "capturedAt": null
+    },
+    {
+      "status": "MISSING",
+      "reason": "PROVIDER_DISABLED",
+      "latitude": null,
+      "longitude": null,
+      "accuracyMeters": null,
+      "capturedAt": null
+    },
+    {
+      "status": "MISSING",
+      "reason": "UNAVAILABLE",
+      "latitude": null,
+      "longitude": null,
+      "accuracyMeters": null,
+      "capturedAt": null
+    }
+  ],
+  "snapshotAfterClose": {
+    "generatedAt": "2026-10-16T17:01:00.000Z",
+    "employee": {
+      "id": "10000000-0000-4000-8000-000000000001",
+      "displayName": "Демо инженер",
+      "login": "engineer.demo"
+    },
+    "sites": [
+      {
+        "id": "10000000-0000-4000-8000-000000000002",
+        "name": "Демо объект",
+        "address": "Демонстрационный адрес"
+      }
+    ],
+    "equipment": [
+      {
+        "id": "10000000-0000-4000-8000-000000000003",
+        "siteId": "10000000-0000-4000-8000-000000000002",
+        "name": "Насос",
+        "inventoryNumber": "DEMO-001"
+      }
+    ],
+    "workOrders": [
+      {
+        "id": "10000000-0000-4000-8000-000000000004",
+        "equipmentId": "10000000-0000-4000-8000-000000000003",
+        "assigneeId": "10000000-0000-4000-8000-000000000001",
+        "title": "Осмотр насоса",
+        "description": "Проверить оборудование",
+        "dueAt": null,
+        "status": "CLOSED",
+        "revision": 2,
+        "checklistItems": [
+          {
+            "id": "10000000-0000-4000-8000-000000000005",
+            "position": 0,
+            "text": "Внешний осмотр выполнен",
+            "required": true
+          }
+        ],
+        "measurementSpecs": [
+          {
+            "key": "pressure",
+            "label": "Давление",
+            "unit": "bar",
+            "required": true,
+            "min": "0",
+            "max": "10"
+          }
+        ],
+        "result": {
+          "id": "10000000-0000-4000-8000-000000000006",
+          "answers": [
+            {
+              "itemId": "10000000-0000-4000-8000-000000000005",
+              "checked": true
+            }
+          ],
+          "readings": [
+            {
+              "key": "pressure",
+              "value": "2.40"
+            }
+          ],
+          "comment": "Демонстрационный результат",
+          "location": {
+            "status": "MISSING",
+            "reason": "DENIED",
+            "latitude": null,
+            "longitude": null,
+            "accuracyMeters": null,
+            "capturedAt": null
+          },
+          "capturedAt": "2026-10-16T17:00:00.000Z",
+          "photos": [
+            {
+              "id": "10000000-0000-4000-8000-000000000007",
+              "serverPhotoId": "10000000-0000-4000-8000-000000000008",
+              "mimeType": "image/jpeg",
+              "byteSize": 631,
+              "sha256": "4a0043beb47e76e4bf6a12e9d93832dc69d596c8d1b114870e17f9d1420d61bf",
+              "createdAt": "2026-10-16T17:00:00.000Z",
+              "contentPath": "/api/v1/photos/10000000-0000-4000-8000-000000000008/content"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "errorExamples": {
+    "revisionConflict": {
+      "status": 409,
+      "body": {
+        "error": {
+          "code": "REVISION_CONFLICT",
+          "message": "REVISION_CONFLICT",
+          "retryable": false,
+          "details": {
+            "currentRevision": 2
+          }
+        },
+        "requestId": "10000000-0000-4000-8000-000000000011"
+      }
+    },
+    "closed": {
+      "status": 409,
+      "body": {
+        "error": {
+          "code": "ORDER_CLOSED",
+          "message": "ORDER_CLOSED",
+          "retryable": false,
+          "details": {
+            "currentRevision": 2
+          }
+        },
+        "requestId": "10000000-0000-4000-8000-000000000011"
+      }
+    },
+    "idempotencyKeyReused": {
+      "status": 409,
+      "body": {
+        "error": {
+          "code": "IDEMPOTENCY_KEY_REUSED",
+          "message": "IDEMPOTENCY_KEY_REUSED",
+          "retryable": false,
+          "details": {}
+        },
+        "requestId": "10000000-0000-4000-8000-000000000011"
+      }
+    },
+    "validation": {
+      "status": 422,
+      "body": {
+        "error": {
+          "code": "VALIDATION_ERROR",
+          "message": "VALIDATION_ERROR",
+          "retryable": false,
+          "details": {
+            "fields": [
+              {
+                "path": "result.readings",
+                "code": "REQUIRED"
+              }
+            ]
+          }
+        },
+        "requestId": "10000000-0000-4000-8000-000000000011"
+      }
+    },
+    "auth": {
+      "status": 401,
+      "body": {
+        "error": {
+          "code": "AUTH_REQUIRED",
+          "message": "AUTH_REQUIRED",
+          "retryable": false,
+          "details": {}
+        },
+        "requestId": "10000000-0000-4000-8000-000000000011"
+      }
+    },
+    "rateLimit": {
+      "status": 429,
+      "headers": {
+        "Retry-After": "30"
+      },
+      "body": {
+        "error": {
+          "code": "RATE_LIMITED",
+          "message": "RATE_LIMITED",
+          "retryable": true,
+          "details": {}
+        },
+        "requestId": "10000000-0000-4000-8000-000000000011"
+      }
+    }
+  },
+  "localOnlyExamples": {
+    "note": "Not server wire DTO. Room operation IDs UUID; timestamps/revision/sequence are not entity IDs. Draft JSON never sent before close.",
+    "appLog": {
+      "id": "10000000-0000-4000-8000-000000000012",
+      "at": "2026-10-16T17:00:00.000Z",
+      "level": "INFO",
+      "eventCode": "SYNC_STARTED",
+      "operationId": "10000000-0000-4000-8000-000000000010",
+      "requestId": null,
+      "safeMessage": "Синхронизация запущена"
+    },
+    "photo": {
+      "id": "10000000-0000-4000-8000-000000000007",
+      "localPath": "<filesDir>/<employeeId>/photos/10000000-0000-4000-8000-000000000007.jpg",
+      "serverPhotoId": "10000000-0000-4000-8000-000000000008",
+      "contentPath": "/api/v1/photos/10000000-0000-4000-8000-000000000008/content"
+    },
+    "outboxAfterUploadAck": [
+      {
+        "id": "10000000-0000-4000-8000-000000000009",
+        "kind": "UPLOAD_PHOTO",
+        "sequence": 1,
+        "state": "ACKED",
+        "dependencies": []
+      },
+      {
+        "id": "10000000-0000-4000-8000-000000000010",
+        "kind": "CLOSE_WORK_ORDER",
+        "sequence": 2,
+        "state": "PENDING",
+        "dependencies": [
+          "10000000-0000-4000-8000-000000000009"
+        ]
+      }
+    ]
+  }
+}
