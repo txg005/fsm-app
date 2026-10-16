@@ -17,6 +17,16 @@ object RetryPolicy {
     fun delayMillis(attempt:Int,jitter:Long=Random.nextLong(1000)):Long=(2000L shl (attempt-1).coerceIn(0,8)).coerceAtMost(300000)+jitter
     fun state(status:Int)=when { status==401->"AUTH_REQUIRED"; status==409->"CONFLICT"; transient(status)->"RETRY_WAIT"; else->"FAILED" }
 }
+class LocalIntegrityFailure:Exception("LOCAL_INTEGRITY_ERROR")
+suspend fun preparedPhotoBytes(photo:Photo,ownedFile:(String)->java.io.File?):ByteArray = withContext(Dispatchers.IO) {
+    try {
+        val file=requireNotNull(photo.localPath?.let(ownedFile)); check(file.isFile)
+        val bytes=file.readBytes()
+        check(bytes.size.toLong()==photo.byteSize && sha256(bytes)==photo.sha256)
+        bytes
+    } catch(e:CancellationException) { throw e } catch(_:Exception) { throw LocalIntegrityFailure() }
+}
+fun retryOperation(op:Operation,code:String,at:Long=System.currentTimeMillis())=op.copy(state="RETRY_WAIT",attempts=op.attempts+1,error=code,nextAttemptAt=at+RetryPolicy.delayMillis(op.attempts+1))
 fun readyOperation(all:List<Operation>, at:Long, perRun:Map<String,Int>):Operation? = all.firstOrNull {
     it.state in listOf("PENDING","RETRY_WAIT") && it.nextAttemptAt<=at && (perRun[it.id] ?: 0)<5 &&
         wire.decodeFromString<List<String>>(it.dependencies).all { dep -> all.any { op -> op.id==dep && op.state=="ACKED" } }
@@ -25,7 +35,7 @@ class SyncEngine(private val repo:Repository,private val isActiveAccount:()->Boo
     suspend fun run(progress:(Int)->Unit={}) = SyncGate.mutex.withLock {
         if(!isActiveAccount()) return@withLock
         val store=repo.store
-        store.recover(); store.resumeAuth()
+        repo.recover(); store.resumeAuth()
         repo.logger.record(Event.SYNC_STARTED)
         val started=System.currentTimeMillis(); var sent=0
         val perRun=mutableMapOf<String,Int>()
@@ -39,23 +49,29 @@ class SyncEngine(private val repo:Repository,private val isActiveAccount:()->Boo
                 if(order?.available!=true) { store.operation(op.copy(state="FAILED",error="ACCESS_REVOKED")); continue }
                 store.operation(op.copy(state="RUNNING"))
                 perRun[op.id]=(perRun[op.id] ?: 0)+1
+                var dispatched=false
                 try {
-                    if(op.kind=="UPLOAD_PHOTO") upload(op) else close(op)
+                    if(op.kind=="UPLOAD_PHOTO") upload(op) { dispatched=true } else close(op) { dispatched=true }
                     sent++; progress(sent); repo.logger.record(Event.OP_ACK,op.id)
-                } catch(e:CancellationException) { throw e }
+                } catch(e:CancellationException) {
+                    if(dispatched) withContext(NonCancellable) {
+                        val latest=store.operations().first { it.id==op.id }
+                        if(latest.state=="RUNNING") store.operation(retryOperation(latest,"UNKNOWN_OUTCOME"))
+                    }
+                    throw e
+                }
                 catch(e:Exception) {
                     val api=e as? ApiFailure
-                    val state= if(api!=null) RetryPolicy.state(api.status) else if(e is IOException || e is io.ktor.client.plugins.HttpRequestTimeoutException) "RETRY_WAIT" else "FAILED"
-                    val code=api?.code ?: if(state=="RETRY_WAIT") "NETWORK_UNAVAILABLE" else "LOCAL_INTEGRITY_ERROR"
-                    val latest=store.operations().first { it.id==op.id }
-                    val attempts=op.attempts+1
-                    store.operation(latest.copy(state=state,attempts=attempts,error=code,nextAttemptAt=System.currentTimeMillis()+maxOf(RetryPolicy.delayMillis(attempts),api?.retryAfter ?: 0)))
+                    val state= if(api!=null) RetryPolicy.state(api.status) else if(dispatched || e is IOException || e is io.ktor.client.plugins.HttpRequestTimeoutException) "RETRY_WAIT" else "FAILED"
+                    val code=api?.code ?: if(dispatched) "UNKNOWN_OUTCOME" else if(state=="RETRY_WAIT") "NETWORK_UNAVAILABLE" else "LOCAL_INTEGRITY_ERROR"
                     if(state=="CONFLICT") {
-                        // The failed dependency must not leave its close indefinitely pending.
-                        store.operations().filter { it.workOrderId==op.workOrderId && it.id!=op.id && it.state in listOf("PENDING","RETRY_WAIT") }.forEach { store.operation(it.copy(state="CONFLICT",error=code)) }
-                        repo.markConflict(op.workOrderId)
-                    } else if(state=="FAILED") {
-                        store.operations().filter { it.workOrderId==op.workOrderId && it.id!=op.id && it.state in listOf("PENDING","RETRY_WAIT") }.forEach { store.operation(it.copy(state="FAILED",error=code)) }
+                        repo.markConflict(op.workOrderId,op,code) // ONE transaction before suspend GET.
+                        try { repo.freshCanonical(op.workOrderId) } catch(e:CancellationException) { throw e } catch(_:Exception) { /* No current canonical; local/frozen state remains resolvable. */ }
+                    } else {
+                        val latest=store.operations().first { it.id==op.id }
+                        val attempts=op.attempts+1
+                        store.operation(latest.copy(state=state,attempts=attempts,error=code,nextAttemptAt=System.currentTimeMillis()+maxOf(RetryPolicy.delayMillis(attempts),api?.retryAfter ?: 0)))
+                        if(state=="FAILED") store.operations().filter { it.workOrderId==op.workOrderId && it.id!=op.id && it.state in listOf("PENDING","RETRY_WAIT") }.forEach { store.operation(it.copy(state="FAILED",error=code)) }
                     }
                     repo.logger.record(if(state=="RETRY_WAIT") Event.OP_RETRY else Event.OP_BLOCKED,op.id)
                     if(state=="AUTH_REQUIRED") break
@@ -66,19 +82,22 @@ class SyncEngine(private val repo:Repository,private val isActiveAccount:()->Boo
             repo.logger.record(Event.SYNC_FINISHED)
         } finally { withContext(NonCancellable) { store.recover() } }
     }
-    private suspend fun upload(op:Operation) {
+    private suspend fun upload(op:Operation,onDispatch:()->Unit) {
         val photo=requireNotNull(repo.store.photo(requireNotNull(op.photoId)))
-        val file=requireNotNull(photo.localPath?.let(repo::ownedFile)); val bytes=withContext(Dispatchers.IO) { file.readBytes() }
-        check(bytes.size.toLong()==photo.byteSize && sha256(bytes)==photo.sha256)
+        val bytes=preparedPhotoBytes(photo,repo::ownedFile)
         val metadata=wire.decodeFromString<PhotoUploadMetadata>(op.frozenPayload)
+        check(metadata.photoId==photo.id && metadata.byteSize==photo.byteSize && metadata.sha256==photo.sha256 && metadata.mimeType=="image/jpeg")
+        onDispatch()
+        uncertainMutation {
         val receipt=repo.api.upload(op.workOrderId,op.id,metadata,bytes)
         check(receipt.operationId==op.id && receipt.photo.id==photo.id && receipt.photo.sha256==photo.sha256 && receipt.photo.byteSize==photo.byteSize && Api.validContentPath(receipt.photo))
         repo.db.withTransaction {
             repo.store.photo(photo.copy(serverPhotoId=receipt.photo.serverPhotoId,contentPath=receipt.photo.contentPath))
             repo.store.operation(op.copy(state="ACKED"))
         }
+        }
     }
-    private suspend fun close(op:Operation) {
+    private suspend fun close(op:Operation,onDispatch:()->Unit) {
         val body=repo.db.withTransaction {
             val current=repo.store.operations().first { it.id==op.id }
             current.wireBody ?: kotlin.run {
@@ -89,11 +108,14 @@ class SyncEngine(private val repo:Repository,private val isActiveAccount:()->Boo
                 repo.store.operation(current.copy(wireBody=final)); final
             }
         }
+        onDispatch()
+        uncertainMutation {
         val receipt=repo.api.close(op.workOrderId,op.id,body)
         check(receipt.operationId==op.id && receipt.workOrder.id==op.workOrderId && receipt.workOrder.status=="CLOSED")
         repo.db.withTransaction {
             repo.applyCanonical(receipt.workOrder)
             repo.store.operation(repo.store.operations().first { it.id==op.id }.copy(state="ACKED"))
+        }
         }
     }
 }

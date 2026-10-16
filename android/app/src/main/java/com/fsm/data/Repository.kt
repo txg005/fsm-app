@@ -131,33 +131,69 @@ class Repository(val db:FsmDatabase,val api:Api,val employeeId:String,val files:
             }
         }
     }
-    suspend fun markConflict(orderId:String) {
-        val canonical=try { api.order(orderId) } catch(e:kotlinx.coroutines.CancellationException) { throw e } catch(_:Exception) { null }
-        db.withTransaction {
-            if(canonical!=null) store.shadow(Shadow(orderId,wire.encodeToString(canonical)))
-            store.result(orderId)?.let { store.result(it.copy(lifecycle="CONFLICT")) }
+    // Durable state change precedes any network call. Clearing shadow is the freshness marker;
+    // no schema change and no old cached canonical can authorize destructive resolution.
+    suspend fun markConflict(orderId:String, failed:Operation?=null, code:String="REVISION_CONFLICT") = db.withTransaction {
+        store.operations().filter { it.workOrderId==orderId && (it.id==failed?.id || it.state in listOf("RUNNING","PENDING","RETRY_WAIT","AUTH_REQUIRED")) }.forEach {
+            store.operation(it.copy(state="CONFLICT",error=code,attempts=if(it.id==failed?.id) it.attempts+1 else it.attempts))
+        }
+        store.result(orderId)?.let { store.result(it.copy(lifecycle="CONFLICT")) }
+        store.deleteShadow(orderId)
+    }
+    suspend fun recover() = db.withTransaction {
+        store.recover()
+        // Repair interrupted transitions from the earlier WIP as well as normal restart.
+        store.operations().filter { it.state=="CONFLICT" }.map { it.workOrderId }.distinct().forEach { id ->
+            if(store.result(id)?.lifecycle=="QUEUED") markConflict(id)
         }
     }
-    suspend fun returnToDraft(orderId:String) = db.withTransaction {
-        val local=requireNotNull(store.result(orderId))
-        val operations=store.operations().filter { it.workOrderId==orderId }
-        val canonical=store.shadow(orderId)?.let { wire.decodeFromString<WorkOrderDto>(it.json) }
-        val correctable=operations.any { it.state=="FAILED" && it.error in listOf("MALFORMED_REQUEST","VALIDATION_ERROR","PHOTO_TOO_LARGE","REQUEST_TOO_LARGE","PHOTO_CONTENT_INVALID") }
-        val conflict=local.lifecycle=="CONFLICT" && operations.none { it.error=="IDEMPOTENCY_KEY_REUSED" } && canonical?.status=="ASSIGNED"
-        check(correctable || conflict)
-        check(store.order(orderId)?.available==true)
-        check(operations.none { it.state in listOf("RUNNING","PENDING","RETRY_WAIT","AUTH_REQUIRED") })
-        store.deleteOperations(orderId)
-        val revision=canonical?.revision ?: local.baseRevision
-        if(canonical!=null) store.order(WorkOrder(canonical.id,canonical.equipmentId,canonical.assigneeId,wire.encodeToString(canonical)))
-        store.result(local.copy(lifecycle="DRAFT",baseRevision=revision))
+    suspend fun freshCanonical(orderId:String):String {
+        store.deleteShadow(orderId)
+        val canonical=api.order(orderId) // Authorized GET every time; failures preserve local result/outbox.
+        val row=requireNotNull(store.order(orderId))
+        ConflictPolicy.validate(canonical,orderId,employeeId,row.available)
+        val json=wire.encodeToString(canonical)
+        store.shadow(Shadow(orderId,json))
+        return json
     }
-    suspend fun acceptServer(orderId:String) = db.withTransaction {
-        val local=requireNotNull(store.result(orderId)); check(local.lifecycle=="CONFLICT")
-        val ops=store.operations().filter { it.workOrderId==orderId }
-        check(ops.none { it.state in listOf("RUNNING","PENDING","RETRY_WAIT","AUTH_REQUIRED") } || ops.isEmpty())
-        val canonical=requireNotNull(store.shadow(orderId)).let { wire.decodeFromString<WorkOrderDto>(it.json) }
-        store.deleteOperations(orderId); store.deleteResult(orderId); applyCanonical(canonical)
-        // Orphan files are swept on explicit cache cleanup; never delete a queued file by callback.
+    private suspend fun confirmedCanonical(orderId:String,shown:String?):WorkOrderDto {
+        val fresh=freshCanonical(orderId)
+        if(!ConflictPolicy.sameShown(shown,fresh)) throw CanonicalChanged(fresh)
+        return wire.decodeFromString(fresh)
     }
+    suspend fun returnToDraft(orderId:String,shown:String?=null) {
+        val canonical=confirmedCanonical(orderId,shown)
+        db.withTransaction {
+            val local=requireNotNull(store.result(orderId))
+            val operations=store.operations().filter { it.workOrderId==orderId }
+            val correctable=operations.any { it.state=="FAILED" && it.error in listOf("MALFORMED_REQUEST","VALIDATION_ERROR","PHOTO_TOO_LARGE","REQUEST_TOO_LARGE","PHOTO_CONTENT_INVALID") }
+            val conflict=local.lifecycle=="CONFLICT" && operations.none { it.error=="IDEMPOTENCY_KEY_REUSED" }
+            check((correctable || conflict) && canonical.status=="ASSIGNED")
+            ConflictPolicy.validate(canonical,orderId,employeeId,store.order(orderId)?.available==true)
+            check(operations.none { it.state in listOf("RUNNING","PENDING","RETRY_WAIT","AUTH_REQUIRED") })
+            store.deleteOperations(orderId)
+            store.order(WorkOrder(canonical.id,canonical.equipmentId,canonical.assigneeId,wire.encodeToString(canonical)))
+            store.result(local.copy(lifecycle="DRAFT",baseRevision=canonical.revision))
+        }
+    }
+    suspend fun acceptServer(orderId:String,shown:String?=null) {
+        val canonical=confirmedCanonical(orderId,shown)
+        db.withTransaction {
+            val local=requireNotNull(store.result(orderId)); check(local.lifecycle=="CONFLICT")
+            val ops=store.operations().filter { it.workOrderId==orderId }
+            check(ops.none { it.state in listOf("RUNNING","PENDING","RETRY_WAIT","AUTH_REQUIRED") })
+            ConflictPolicy.validate(canonical,orderId,employeeId,store.order(orderId)?.available==true)
+            store.deleteOperations(orderId); store.deleteResult(orderId); applyCanonical(canonical)
+            // Orphan files are swept on explicit cache cleanup, never on an unconfirmed response.
+        }
+    }
+}
+class CanonicalChanged(val canonical:String):Exception()
+object ConflictPolicy {
+    fun validate(order:WorkOrderDto,id:String,employeeId:String,available:Boolean) {
+        check(available && order.id==id && order.assigneeId==employeeId)
+        check(order.revision>0 && ((order.status=="ASSIGNED" && order.result==null) || (order.status=="CLOSED" && order.result!=null)))
+    }
+    fun sameShown(shown:String?,fresh:String):Boolean = shown!=null &&
+        wire.decodeFromString<WorkOrderDto>(shown)==wire.decodeFromString<WorkOrderDto>(fresh)
 }
