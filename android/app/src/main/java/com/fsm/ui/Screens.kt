@@ -102,7 +102,7 @@ import java.io.File
                     photos.forEach { photo -> PhotoCard(photo); if(photo.localPath==null && photo.serverPhotoId!=null) OutlinedButton(enabled=!vm.busy,onClick={vm.action { vm.repo?.cachePhoto(photo.id) }}) {Text("Скачать фото для offline")} }
                     vm.operations.filter { it.workOrderId==order.id }.forEach { Text("${it.kind}: ${it.state} ${it.error ?: ""}") }
                     if(result?.lifecycle=="CONFLICT") Button(enabled=!vm.busy,onClick={vm.conflict()}) {Text("Сравнить версии")}
-                    if(vm.operations.any { it.workOrderId==order.id && it.state=="FAILED" }) Button(enabled=!vm.busy,onClick={vm.resolve(false)}) {Text("Исправить после окончательного отказа")}
+                    if(vm.operations.any { it.workOrderId==order.id && it.state=="FAILED" }) Button(enabled=!vm.busy,onClick={vm.conflict()}) {Text("Исправить после окончательного отказа")}
                     if(result?.lifecycle=="QUEUED") { Text("Правки заблокированы до однозначного исхода. Отмена передачи не отменяет закрытие."); Button(onClick={vm.sync()}) {Text("Передать Service") } }
                 } else Text("Заявка загружается из Room или больше недоступна")
                 "form" -> {
@@ -147,8 +147,9 @@ import java.io.File
                     Text("Локальная frozen копия сохранена. Автоматического merge нет.")
                     Text("Локальная версия",style=MaterialTheme.typography.titleMedium); Text(result?.json ?: "Нет")
                     Text("Серверная версия",style=MaterialTheme.typography.titleMedium); Text(vm.shadow ?: "Не удалось загрузить серверную версию")
-                    Button(enabled=!vm.busy,onClick={accept=true}) {Text("Принять серверную…")}
-                    Button(enabled=!vm.busy,onClick={vm.resolve(false)}) {Text("Вернуться к черновику, если сервер ASSIGNED")}
+                    OutlinedButton(enabled=!vm.busy,onClick={vm.conflict()}) {Text("Загрузить актуальную версию")}
+                    Button(enabled=!vm.busy&&vm.shadow!=null,onClick={accept=true}) {Text("Принять серверную…")}
+                    Button(enabled=!vm.busy&&vm.shadow!=null,onClick={vm.resolve(false)}) {Text("Вернуться к черновику, если сервер ASSIGNED")}
                 }
             }
         }

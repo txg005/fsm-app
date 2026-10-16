@@ -105,10 +105,19 @@ class FsmModel(application:Application,private val saved:SavedStateHandle):Andro
     }
     fun stopSync() { repo?.let { app.cancelBackground(it.employeeId) }; app.stopService(Intent(app,SyncService::class.java)) }
     fun refresh()=action { SyncGate.mutex.withLock { requireNotNull(repo).snapshot() } }
-    fun conflict()=action { shadow=repo?.store?.shadow(requireNotNull(selected))?.json; go("conflict") }
+    fun conflict()=action {
+        shadow=null; go("conflict")
+        SyncGate.mutex.withLock { shadow=requireNotNull(repo).freshCanonical(requireNotNull(selected)) }
+    }
     fun resolve(server:Boolean)=action {
-        SyncGate.mutex.withLock { if(server) requireNotNull(repo).acceptServer(requireNotNull(selected)) else requireNotNull(repo).returnToDraft(requireNotNull(selected)) }
-        edits=null; go("detail")
+        val shown=shadow; shadow=null
+        try {
+            SyncGate.mutex.withLock { if(server) requireNotNull(repo).acceptServer(requireNotNull(selected),shown) else requireNotNull(repo).returnToDraft(requireNotNull(selected),shown) }
+            edits=null; go("detail")
+        } catch(e:CanonicalChanged) {
+            shadow=e.canonical; go("conflict")
+            error="Серверная версия изменилась. Сравните показанные данные и подтвердите выбор заново. Локальные данные и очередь сохранены."
+        }
     }
     fun logout()=action {
         stopSync()
