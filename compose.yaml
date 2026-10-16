@@ -1,0 +1,39 @@
+services:
+  postgres:
+    image: postgres:16.8-alpine
+    environment:
+      POSTGRES_DB: fsm
+      POSTGRES_USER: fsm
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fsm -d fsm"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  api:
+    build: ./backend
+    environment:
+      DATABASE_URL: jdbc:postgresql://postgres:5432/fsm
+      DATABASE_USER: fsm
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD in .env}
+      JWT_SECRET_BASE64: ${JWT_SECRET_BASE64:?Set JWT_SECRET_BASE64 in .env}
+      SEED_DEMO: "true"
+      DEMO_LOGIN_1: ${DEMO_LOGIN_1:?Set DEMO_LOGIN_1 in .env}
+      DEMO_PASSWORD_1: ${DEMO_PASSWORD_1:?Set DEMO_PASSWORD_1 in .env}
+      DEMO_LOGIN_2: ${DEMO_LOGIN_2:?Set DEMO_LOGIN_2 in .env}
+      DEMO_PASSWORD_2: ${DEMO_PASSWORD_2:?Set DEMO_PASSWORD_2 in .env}
+      PHOTO_STORAGE_DIR: /var/lib/fsm/photos
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - photo_data:/var/lib/fsm/photos
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+volumes:
+  postgres_data:
+  photo_data:
