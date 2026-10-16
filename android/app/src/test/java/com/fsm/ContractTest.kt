@@ -9,6 +9,7 @@ import io.ktor.client.request.forms.*
 import io.ktor.http.*
 import io.ktor.http.content.*
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.*
 import kotlinx.serialization.encodeToString
 import org.junit.Assert.*
@@ -123,6 +124,85 @@ class ContractTest {
         val api=Api(client,"https://example.test",tokens,token.employee.id).apply {accept(token)}
         try {api.snapshot(); fail("Expected auth pause")} catch(e:ApiFailure) {assertEquals(401,e.status)}
         assertEquals(2,calls); assertEquals(token.refreshToken,tokens.token); client.close()
+    }
+
+    @Test fun freshCanonicalPolicyRejectsStaleClosedAndWrongAccount() {
+        val assigned=read<SnapshotDto>("snapshotBeforeClose").workOrders.single()
+        val closed=read<SnapshotDto>("snapshotAfterClose").workOrders.single()
+        val shown=wire.encodeToString(assigned)
+        assertTrue(ConflictPolicy.sameShown(shown,shown))
+        assertFalse(ConflictPolicy.sameShown(null,shown))
+        assertFalse(ConflictPolicy.sameShown(shown,wire.encodeToString(closed)))
+        assertFalse(ConflictPolicy.sameShown(shown,wire.encodeToString(assigned.copy(revision=2))))
+        ConflictPolicy.validate(closed,assigned.id,assigned.assigneeId,true)
+        listOf(assigned.copy(id=uuid()),assigned.copy(assigneeId=uuid()),assigned.copy(status="DELETED"),closed.copy(result=null)).forEach {
+            try { ConflictPolicy.validate(it,assigned.id,assigned.assigneeId,true); fail("Must reject unavailable/wrong canonical") } catch(_:IllegalStateException) {}
+        }
+        try { ConflictPolicy.validate(assigned,assigned.id,assigned.assigneeId,false); fail() } catch(_:IllegalStateException) {}
+    }
+    @Test fun malformedSuccessAndInvalidReceiptReplayExactFrozenBytes()=runTest {
+        val close=fixture["close"]!!.jsonObject; val body=close["closeExactBodyUtf8"]!!.jsonPrimitive.content
+        val good=wire.decodeFromJsonElement<CloseReceipt>(close.getValue("response"))
+        val token=wire.decodeFromJsonElement<TokenResponse>(fixture["auth"]!!.jsonObject.getValue("tokenResponse"))
+        var calls=0
+        val client=HttpClient(engine { request ->
+            assertEquals(good.operationId,request.headers["Idempotency-Key"])
+            assertEquals(body,(request.body as TextContent).text)
+            calls++ // Server accepted the same frozen operation; first two responses cannot be trusted.
+            respond(when(calls) { 1 -> "{broken"; 2 -> wire.encodeToString(good.copy(operationId=uuid())); else -> wire.encodeToString(good) },HttpStatusCode.OK)
+        })
+        val api=Api(client,"https://example.test",Tokens(null),token.employee.id).apply {accept(token)}
+        val original=Operation(good.operationId,"CLOSE_WORK_ORDER",good.workOrder.id,sequence=1,frozenPayload=body,wireBody=body)
+        var op=original
+        repeat(2) {
+            try {api.close(op.workOrderId,op.id,requireNotNull(op.wireBody));fail("Invalid response is not ACK")} catch(_:UnknownOutcome) {}
+            op=retryOperation(op,"UNKNOWN_OUTCOME",1000)
+            assertEquals(original.id,op.id); assertEquals(original.wireBody,op.wireBody); assertEquals(original.frozenPayload,op.frozenPayload)
+            assertNull(readyOperation(listOf(op),1000,emptyMap()))
+        }
+        assertEquals(good,api.close(op.workOrderId,op.id,requireNotNull(op.wireBody)))
+        assertEquals(3,calls); client.close()
+    }
+    @Test fun cancellationAfterServerAcceptanceReplaysSameKeyAndBytes()=runTest {
+        val close=fixture["close"]!!.jsonObject; val body=close["closeExactBodyUtf8"]!!.jsonPrimitive.content
+        val good=wire.decodeFromJsonElement<CloseReceipt>(close.getValue("response"))
+        val token=wire.decodeFromJsonElement<TokenResponse>(fixture["auth"]!!.jsonObject.getValue("tokenResponse"))
+        val accepted=kotlinx.coroutines.CompletableDeferred<Unit>(); var calls=0
+        val client=HttpClient(engine { request ->
+            calls++; assertEquals(good.operationId,request.headers["Idempotency-Key"]); assertEquals(body,(request.body as TextContent).text)
+            if(calls==1) { accepted.complete(Unit); kotlinx.coroutines.awaitCancellation() }
+            respond(wire.encodeToString(good),HttpStatusCode.OK)
+        })
+        val api=Api(client,"https://example.test",Tokens(null),token.employee.id).apply {accept(token)}
+        val job=kotlinx.coroutines.CoroutineScope(coroutineContext).launch {api.close(good.workOrder.id,good.operationId,body)}
+        accepted.await(); job.cancel(); job.join()
+        assertEquals(good,api.close(good.workOrder.id,good.operationId,body)); assertEquals(2,calls); client.close()
+    }
+    @Test fun invalidUploadReceiptIsUnknownAndRetryable()=runTest {
+        val upload=fixture["photoUpload"]!!.jsonObject
+        val meta=wire.decodeFromJsonElement<PhotoUploadMetadata>(upload.getValue("metadata"))
+        val good=wire.decodeFromJsonElement<PhotoUploadReceipt>(upload.getValue("response"))
+        val bytes=Base64.getDecoder().decode(upload["jpegBase64"]!!.jsonPrimitive.content)
+        val token=wire.decodeFromJsonElement<TokenResponse>(fixture["auth"]!!.jsonObject.getValue("tokenResponse")); var calls=0
+        val client=HttpClient(engine { request ->
+            assertEquals(good.operationId,request.headers["Idempotency-Key"]); calls++
+            respond(wire.encodeToString(if(calls==1) good.copy(photo=good.photo.copy(sha256="invalid")) else good),HttpStatusCode.Created)
+        })
+        val api=Api(client,"https://example.test",Tokens(null),token.employee.id).apply {accept(token)}
+        val id=read<SnapshotDto>("snapshotBeforeClose").workOrders.single().id
+        try {api.upload(id,good.operationId,meta,bytes); fail()} catch(_:UnknownOutcome) {}
+        assertEquals(good,api.upload(id,good.operationId,meta,bytes)); assertEquals(2,calls); client.close()
+    }
+    @Test fun predispatchPhotoIntegrityNeverCallsHttp()=runTest {
+        val id=uuid(); val file=java.io.File.createTempFile("fsm-integrity", ".jpg")
+        val photo=Photo(id,uuid(),uuid(),uuid(),file.path,3,sha256(byteArrayOf(1,2,3)),now())
+        var dispatched=false
+        try {
+            try { preparedPhotoBytes(photo) {file}; dispatched=true; fail() } catch(_:LocalIntegrityFailure) {}
+            file.delete()
+            try { preparedPhotoBytes(photo) {file}; dispatched=true; fail() } catch(_:LocalIntegrityFailure) {}
+            assertFalse(dispatched)
+        } finally {file.delete()}
     }
 
 }
