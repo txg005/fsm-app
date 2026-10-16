@@ -6,11 +6,12 @@ No Android code, draft endpoints, registration, or create-work-order endpoint.
 
 ## Verification status
 
-Implementation is **not yet accepted**. Initial compilation found a Kotlin receiver
-error in `Application.kt` (fixed locally). Subsequent compilation/tests were
-interrupted by shared sandbox resource failure. Do not infer passing compilation,
-PostgreSQL integration, Docker build, or container durability from this document.
-Docker was unavailable in the implementation sandbox.
+The backend compiles on JDK17. The final sequential Gradle invocation passed
+`test`, `integrationTest`, and `installDist`: **5 unit + 9 real PostgreSQL tests,
+0 failures/errors/skips**. Real Netty HTTP smoke also passed. See `VERIFICATION.md`
+for exact commands, preceding failures, and limitations. This is backend
+verification, not full product acceptance: Docker and Android end-to-end were
+not tested here.
 
 ## Configuration
 
@@ -35,13 +36,50 @@ allows ownership checks. Existing credentials cannot be changed through API v1.
 
 ## Build/run
 
-From `backend/`, with JDK 17 and Gradle 8.14.3:
+From `backend/`, with JDK 17:
 
 ```sh
-gradle test
-gradle installDist
+sh gradlew --no-daemon --no-parallel --max-workers=1 test
+sh gradlew --no-daemon --no-parallel --max-workers=1 installDist
 build/install/fsm-backend/bin/fsm-backend
 ```
+
+The genuine Gradle 8.14.3 generated wrapper jar is losslessly stored as
+`gradle/wrapper/gradle-wrapper.jar.base64` because GitHub MCP accepts text files.
+`gradlew` decodes it outside the checkout, verifies its pinned SHA-256, and runs
+the real `GradleWrapperMain`. The distribution checksum is pinned too.
+Use `sh gradlew`: text-only MCP publishing cannot set the executable bit.
+The bootstrap requires GNU `base64` and `sha256sum` (Linux). The Docker build
+uses the pinned Gradle image and does not need that bootstrap.
+
+For Compose, from the repository root:
+
+```sh
+cp .env.example .env
+# Edit .env privately; replace every placeholder. Never commit it.
+docker compose config --quiet
+docker compose up --build -d
+curl --fail http://127.0.0.1:8080/health
+docker compose down
+```
+
+Do not print `docker compose config` without `--quiet`: interpolation includes
+secrets. PostgreSQL is not published to the host. API binds loopback only.
+`down` preserves both named volumes; `down -v` irreversibly deletes demo data.
+Outside local development terminate TLS at a correctly configured reverse
+proxy, never expose the debug HTTP port directly to an untrusted network.
+
+Real PostgreSQL integration tests use a new disposable schema per test:
+
+```sh
+# Export TEST_DATABASE_URL, TEST_DATABASE_USER, TEST_DATABASE_PASSWORD privately.
+# The role needs CREATE SCHEMA. Do not target a production database.
+sh gradlew --no-daemon --no-parallel --max-workers=1 integrationTest
+```
+
+Missing test database configuration fails the suite, rather than reporting
+silently skipped integration tests. `test` runs unit fixtures only;
+`integrationTest` runs the `postgres`-tagged suite separately.
 
 Startup runs Flyway migrations before accepting HTTP. Supply configuration above.
 The process deliberately emits only `STARTUP_FAILED` on startup failure rather
@@ -79,11 +117,16 @@ local filesystem, not an arbitrary network mount.
 No raw HTTP bodies, headers, passwords, tokens, GPS, comments, or raw exception
 messages are logged. `X-Request-Id` is server generated.
 
-## Required remaining verification
+## Remaining verification
 
-Run compilation/unit fixtures and real PostgreSQL integration tests sequentially
-in a healthy environment. Verify malformed JSON and multipart limits, auth expiry,
-ownership, replay after CLOSED, concurrent same/different keys, transaction
-rollback, orphan recovery, and response-loss recovery. Docker build/Compose
-health checks, separate-volume restart durability, and Android end-to-end remain
-unverified until explicitly recorded with commands and exit codes.
+Docker image build/Compose health checks, named-volume/container restart durability,
+deployment TLS/reverse-proxy behavior, Android end-to-end, exhaustive adversarial
+JPEG/multipart fuzzing, and abrupt power-loss durability remain unverified.
+The PostgreSQL tests include fault injection after rename and before receipt;
+these are simulations, not proof of physical disk power-loss behavior.
+
+The optional Linux sandbox smoke script is intentionally environment-specific:
+after `installDist`, `python3 src/test/smoke-local.py` expects local PG trust
+authentication at `127.0.0.1:55432`, role `vercel-sandbox`, and `createdb`/`dropdb`.
+It generates credentials in memory, creates/drops a disposable database, starts
+real Netty on loopback port 58080, and prints only scenario names.

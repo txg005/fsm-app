@@ -25,9 +25,13 @@ dependencies {
 kotlin { jvmToolchain(17) }
 application { mainClass.set("fsm.ApplicationKt") }
 tasks.test {
+    maxHeapSize = "384m"
+    maxParallelForks = 1
     useJUnitPlatform { excludeTags("postgres") }
 }
 val integrationTest by tasks.registering(Test::class) {
+    maxHeapSize = "384m"
+    maxParallelForks = 1
     description = "Real PostgreSQL tests; requires TEST_DATABASE_URL/USER/PASSWORD. Uses a disposable schema."
     testClassesDirs = sourceSets.test.get().output.classesDirs
     classpath = sourceSets.test.get().runtimeClasspath

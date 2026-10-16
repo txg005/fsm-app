@@ -27,7 +27,7 @@ fun Application.fsm(db: Database, auth: Auth, operations: Operations) {
         exception<ApiError> { call, e -> call.error(e) }
         exception<Throwable> { call, e ->
             // Raw exception messages/stacks can contain SQL values or credentials; log whitelist only.
-            environment.log.error("event=REQUEST_FAILED requestId=${call.attributes.getOrNull(RequestId) ?: "unavailable"}")
+            call.application.environment.log.error("event=REQUEST_FAILED requestId=${call.attributes.getOrNull(RequestId) ?: "unavailable"}")
             call.error(ApiError(if(e is java.sql.SQLException) 503 else 500,if(e is java.sql.SQLException) "SERVICE_UNAVAILABLE" else "INTERNAL_ERROR"))
         }
         status(HttpStatusCode.NotFound, HttpStatusCode.MethodNotAllowed, HttpStatusCode.UnsupportedMediaType, HttpStatusCode.BadRequest, HttpStatusCode.PayloadTooLarge) { call,status ->
