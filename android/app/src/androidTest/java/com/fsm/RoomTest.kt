@@ -9,7 +9,12 @@ import com.fsm.data.*
 import com.fsm.sync.*
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.*
+import io.ktor.client.engine.mock.*
+import io.ktor.client.request.HttpRequestData
+import io.ktor.client.request.HttpResponseData
+import io.ktor.http.*
+import io.ktor.http.content.TextContent
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.*
@@ -67,7 +72,10 @@ class RoomTest {
         val op=db.store().operations().single().copy(state="RUNNING",wireBody="frozen exact bytes",attempts=3,nextAttemptAt=1234)
         db.store().operation(op); db.close()
         db=Room.databaseBuilder(context,FsmDatabase::class.java,name).build(); db.store().recover()
-        assertEquals(op.copy(state="PENDING"),db.store().operations().single())
+        val recovered=db.store().operations().single()
+        assertEquals(op.id,recovered.id); assertEquals(op.wireBody,recovered.wireBody); assertEquals(op.frozenPayload,recovered.frozenPayload)
+        assertEquals("RETRY_WAIT",recovered.state); assertEquals("UNKNOWN_OUTCOME",recovered.error)
+        assertTrue(recovered.nextAttemptAt>System.currentTimeMillis()-1000)
     }
     @Test fun uploadBeforeCloseDependenciesAndLocalPathRetention()=runBlocking {
         validDraft(); val id=uuid(); val file=File(repo.files,"$id.jpg").apply {writeBytes(byteArrayOf(1,2,3))}
@@ -114,6 +122,98 @@ class RoomTest {
             assertEquals(8,options.outWidth); assertEquals(12,options.outHeight)
             assertEquals(1,androidx.exifinterface.media.ExifInterface(stored.localPath!!).getAttributeInt(androidx.exifinterface.media.ExifInterface.TAG_ORIENTATION,1))
         } finally {bitmap.recycle();source.delete()}
+    }
+
+    private fun fixture():JsonObject=wire.parseToJsonElement(InstrumentationRegistry.getInstrumentation().context.assets.open("contract-fixtures.json").bufferedReader().use {it.readText()}).jsonObject
+    private fun stub(handler:suspend MockRequestHandleScope.(HttpRequestData)->HttpResponseData) {
+        client.close(); client=HttpClient(MockEngine(handler))
+        val token=wire.decodeFromJsonElement<TokenResponse>(fixture()["auth"]!!.jsonObject.getValue("tokenResponse"))
+        repo=Repository(db,Api(client,"https://example.test",null,order.assigneeId).apply {accept(token)},order.assigneeId,repo.files)
+    }
+    @Test fun conflictTransitionBeforeCancelledFetchSurvivesRestart()=runBlocking {
+        validDraft(); repo.enqueue(order.id,LocationDto.missing("DENIED"))
+        val frozen=db.store().operations().single(); val fetching=CompletableDeferred<Unit>()
+        stub { fetching.complete(Unit); awaitCancellation() }
+        repo.markConflict(order.id,frozen)
+        val job=launch {repo.freshCanonical(order.id)}; fetching.await(); job.cancelAndJoin()
+        assertNull(db.store().shadow(order.id)); assertEquals("CONFLICT",db.store().result(order.id)!!.lifecycle)
+        val conflict=db.store().operations().single()
+        assertEquals("CONFLICT",conflict.state); assertEquals(frozen.id,conflict.id); assertEquals(frozen.frozenPayload,conflict.frozenPayload)
+        db.close(); db=Room.databaseBuilder(context,FsmDatabase::class.java,name).build()
+        assertEquals("CONFLICT",db.store().result(order.id)!!.lifecycle); assertEquals(conflict,db.store().operations().single())
+    }
+    @Test fun failedAuthorizedResolveNeverUsesStaleShadowOrDiscardsQueue()=runBlocking {
+        validDraft(); repo.enqueue(order.id,LocationDto.missing("DENIED")); repo.markConflict(order.id,db.store().operations().single())
+        val local=db.store().result(order.id); val ops=db.store().operations()
+        var status=HttpStatusCode.NotFound
+        stub { respond("{}",status) }
+        for(code in listOf(HttpStatusCode.NotFound,HttpStatusCode.Unauthorized,HttpStatusCode.ServiceUnavailable)) {
+            status=code
+            for(server in listOf(true,false)) {
+                val shown=wire.encodeToString(order); db.store().shadow(Shadow(order.id,shown))
+                try {if(server) repo.acceptServer(order.id,shown) else repo.returnToDraft(order.id,shown);fail()} catch(_:ApiFailure) {}
+                assertNull(db.store().shadow(order.id)); assertEquals(local,db.store().result(order.id)); assertEquals(ops,db.store().operations())
+            }
+        }
+    }
+    @Test fun changedClosedCanonicalRequiresNewChoiceAndCannotReopenDraft()=runBlocking {
+        validDraft(); repo.enqueue(order.id,LocationDto.missing("DENIED")); repo.markConflict(order.id,db.store().operations().single())
+        val closed=wire.decodeFromJsonElement<SnapshotDto>(fixture().getValue("snapshotAfterClose")).workOrders.single()
+        val shown=wire.encodeToString(order); val fresh=wire.encodeToString(closed)
+        var gets=0; stub { gets++; respond(fresh,HttpStatusCode.OK) }
+        val frozen=db.store().operations()
+        try {repo.returnToDraft(order.id,shown);fail()} catch(e:CanonicalChanged) {assertEquals(fresh,e.canonical)}
+        assertEquals(frozen,db.store().operations()); assertEquals("CONFLICT",db.store().result(order.id)!!.lifecycle)
+        try {repo.returnToDraft(order.id,fresh);fail()} catch(_:IllegalStateException) {}
+        try {repo.acceptServer(order.id,shown);fail()} catch(_:CanonicalChanged) {}
+        assertEquals(frozen,db.store().operations())
+        repo.acceptServer(order.id,fresh)
+        assertEquals(4,gets); assertTrue(db.store().operations().isEmpty()); assertEquals("CLOSED",db.store().result(order.id)!!.lifecycle)
+    }
+    @Test fun atomicConflictRollsBackAndLegacyInterruptedStateRepairs()=runBlocking {
+        validDraft(); repo.enqueue(order.id,LocationDto.missing("DENIED")); val frozen=db.store().operations().single()
+        try { db.withTransaction {repo.markConflict(order.id,frozen);error("injected rollback")} } catch(_:IllegalStateException) {}
+        assertEquals(frozen,db.store().operations().single()); assertEquals("QUEUED",db.store().result(order.id)!!.lifecycle)
+        db.store().operation(frozen.copy(state="CONFLICT")); repo.recover()
+        assertEquals("CONFLICT",db.store().result(order.id)!!.lifecycle); assertNull(db.store().shadow(order.id))
+    }
+    private suspend fun closedReceipt(op:Operation):CloseReceipt {
+        val r=wire.decodeFromString<ResultWriteDto>(db.store().result(order.id)!!.json)
+        return CloseReceipt(op.id,order.copy(status="CLOSED",revision=order.revision+1,result=ResultDto(r.id,r.answers,r.readings,r.comment,r.location,r.capturedAt,emptyList())))
+    }
+    @Test fun unknownReceiptRetainsFrozenWireAndBackoffThenSameOperationAcks()=runBlocking {
+        validDraft(); repo.enqueue(order.id,LocationDto.missing("DENIED")); val op=db.store().operations().single(); val good=closedReceipt(op)
+        val sent=mutableListOf<Pair<String?,String>>(); var posts=0
+        stub { request ->
+            if(request.method==HttpMethod.Post) { posts++; sent.add(request.headers["Idempotency-Key"] to (request.body as TextContent).text); respond(if(posts==1) "{broken" else wire.encodeToString(good),HttpStatusCode.OK) }
+            else respond("{}",HttpStatusCode.ServiceUnavailable)
+        }
+        SyncEngine(repo).run()
+        val waiting=db.store().operations().single()
+        assertEquals("RETRY_WAIT",waiting.state); assertEquals("UNKNOWN_OUTCOME",waiting.error); assertTrue(waiting.nextAttemptAt>System.currentTimeMillis())
+        assertEquals("QUEUED",db.store().result(order.id)!!.lifecycle)
+        SyncEngine(repo).run(); assertEquals(1,posts) // No hot-loop before durable deadline.
+        db.store().operation(waiting.copy(nextAttemptAt=0)); SyncEngine(repo).run()
+        assertEquals("ACKED",db.store().operations().single().state); assertEquals(2,posts); assertEquals(sent[0],sent[1]); assertEquals(op.id,sent[0].first)
+        assertEquals(waiting.wireBody,sent[1].second); assertEquals(op.frozenPayload,db.store().operations().single().frozenPayload)
+    }
+    @Test fun cancelAfterDispatchKeepsRetryableSameFrozenOperation()=runBlocking {
+        validDraft(); repo.enqueue(order.id,LocationDto.missing("DENIED")); val op=db.store().operations().single()
+        val accepted=CompletableDeferred<Unit>()
+        stub { accepted.complete(Unit); awaitCancellation() }
+        val job=launch {SyncEngine(repo).run()}; accepted.await(); job.cancelAndJoin()
+        val waiting=db.store().operations().single()
+        assertEquals(op.id,waiting.id); assertEquals(op.frozenPayload,waiting.frozenPayload); assertNotNull(waiting.wireBody)
+        assertEquals("RETRY_WAIT",waiting.state); assertEquals("UNKNOWN_OUTCOME",waiting.error); assertTrue(waiting.nextAttemptAt>System.currentTimeMillis())
+        assertEquals("QUEUED",db.store().result(order.id)!!.lifecycle)
+    }
+    @Test fun missingPhotoIsDefinitiveBeforeDispatchAndMakesNoMutationRequest()=runBlocking {
+        validDraft(); val id=uuid(); val file=File(repo.files,"$id.jpg").apply {writeBytes(byteArrayOf(1,2,3))}
+        repo.addPhoto(order.id,file,id,sha256(file.readBytes())); repo.enqueue(order.id,LocationDto.missing("DENIED")); file.delete()
+        var posts=0; stub { request -> if(request.method==HttpMethod.Post) posts++; respond("{}",HttpStatusCode.ServiceUnavailable) }
+        SyncEngine(repo).run()
+        assertEquals(0,posts); assertTrue(db.store().operations().all {it.state=="FAILED" && it.error=="LOCAL_INTEGRITY_ERROR"})
+        assertEquals("QUEUED",db.store().result(order.id)!!.lifecycle)
     }
 
 }
