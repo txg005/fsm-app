@@ -4,6 +4,7 @@ import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
 import io.ktor.server.testing.*
+import kotlinx.serialization.json.*
 import org.junit.jupiter.api.*
 import org.junit.jupiter.api.Test
 import kotlin.test.*
@@ -158,6 +159,58 @@ class PostgresTest {
             assertEquals(setOf("OK","IDEMPOTENCY_KEY_REUSED"),outcomes.toSet())
             assertEquals(listOf(1,0,1),counts())
         } finally { pool.shutdownNow() }
+    }
+
+    @Test fun `escaped null comment is terminal before SQL no receipt and corrected close succeeds`() = testApplication {
+        application { fsm(db,auth,ops) }
+        val access=auth.login(LoginRequest("engineer.one",password),"comment-validation").accessToken
+        val request=decode<CloseRequest>(closeBody())
+        val template=encode(request.copy(result=request.result.copy(comment="COMMENT_MARKER")))
+        val rejectedKey=newId()
+        // Actual JSON escape in HTTP bytes, not a literal zero byte or a changed DTO serializer.
+        val invalid=template.replace("COMMENT_MARKER", "before\\u0000after")
+        assertTrue(invalid.contains("\\u0000"))
+        repeat(2) {
+            val response=client.post("/api/v1/work-orders/$order/close") {
+                bearerAuth(access); contentType(ContentType.Application.Json)
+                header("Idempotency-Key",rejectedKey); setBody(invalid)
+            }
+            assertEquals(422,response.status.value)
+            val error=wire.parseToJsonElement(response.bodyAsText()).jsonObject.getValue("error").jsonObject
+            assertEquals("VALIDATION_ERROR",error.getValue("code").jsonPrimitive.content)
+            assertEquals(false,error.getValue("retryable").jsonPrimitive.boolean)
+            val field=error.getValue("details").jsonObject.getValue("fields").jsonArray.single().jsonObject
+            assertEquals("result.comment",field.getValue("path").jsonPrimitive.content)
+            assertEquals("INVALID_FORMAT",field.getValue("code").jsonPrimitive.content)
+            assertEquals(listOf(0,0,0),counts())
+            val unchanged=db.tx { it.order(a,order) }
+            assertEquals(OrderStatus.ASSIGNED,unchanged.status); assertEquals(1L,unchanged.revision); assertNull(unchanged.result)
+        }
+        // A decoder may classify a lone surrogate as malformed JSON (400), or
+        // preserve it for comment validation (422). It must never reach SQL/503.
+        val surrogateKeys=mutableListOf<String>()
+        listOf("\\uD800","\\uDC00").forEach { escape ->
+            val key=newId(); surrogateKeys.add(key)
+            val response=client.post("/api/v1/work-orders/$order/close") {
+                bearerAuth(access); contentType(ContentType.Application.Json)
+                header("Idempotency-Key",key); setBody(template.replace("COMMENT_MARKER",escape))
+            }
+            assertTrue(response.status.value in setOf(400,422))
+            assertEquals(listOf(0,0,0),counts())
+        }
+        val corrected=request.copy(result=request.result.copy(comment="Исправлено: \uD83D\uDD27 日本語"))
+        val accepted=client.post("/api/v1/work-orders/$order/close") {
+            bearerAuth(access); contentType(ContentType.Application.Json)
+            header("Idempotency-Key",newId()); setBody(encode(corrected))
+        }
+        assertEquals(200,accepted.status.value)
+        assertEquals(listOf(1,0,1),counts())
+        val canonical=db.tx { it.order(a,order) }
+        assertEquals(OrderStatus.CLOSED,canonical.status); assertEquals(2L,canonical.revision)
+        assertEquals(corrected.result.comment,canonical.result!!.comment)
+        (surrogateKeys+rejectedKey).forEach { key ->
+            assertEquals(0,db.tx { it.query("SELECT count(*) FROM idempotency_receipts WHERE employee_id=? AND operation_id=?",id(a),id(key)) { row -> row.getInt(1) }.single() })
+        }
     }
 
 }

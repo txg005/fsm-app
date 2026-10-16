@@ -9,7 +9,9 @@ No Android code, draft endpoints, registration, or create-work-order endpoint.
 The backend compiles on JDK17. The final sequential Gradle invocation passed
 `test`, `integrationTest`, and `installDist`: **5 unit + 9 real PostgreSQL tests,
 0 failures/errors/skips**. Real Netty HTTP smoke also passed. See `VERIFICATION.md`
-for exact commands, preceding failures, and limitations. This is backend
+for exact commands, preceding failures, and limitations. The later QA comment-Unicode
+fix and its new regressions are currently **not rerun**; the 5+9 counts describe
+the verified baseline before that follow-up. This is backend
 verification, not full product acceptance: Docker and Android end-to-end were
 not tested here.
 

@@ -62,4 +62,16 @@ class ContractTest {
         assertEquals(429,assertFailsWith<ApiError> { limiter.attempt("a") }.status)
         limiter.attempt("b"); at=60000; limiter.attempt("a")
     }
+    @Test fun `comment rejects null and unpaired surrogates without rejecting normal Unicode`() {
+        val order=decode<WorkOrder>(fixtureBytes("workOrderResponse"))
+        val request=decode<CloseRequest>(fixtureBytes("closeNoPhotoRequest"))
+        listOf("before\u0000after", "\uD800", "\uDC00").forEach { bad ->
+            val error=assertFailsWith<ApiError> { validateClose(request.copy(result=request.result.copy(comment=bad)),order) }
+            assertEquals(422,error.status)
+            assertEquals("VALIDATION_ERROR",error.code)
+            assertEquals(buildJsonObject { put("fields",buildJsonArray { add(buildJsonObject { put("path","result.comment"); put("code","INVALID_FORMAT") }) }) },error.details)
+        }
+        validateClose(request.copy(result=request.result.copy(comment="Обычный Unicode: е́ 日本語 \uD83D\uDD27\n")),order)
+    }
+
 }

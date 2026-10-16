@@ -75,3 +75,19 @@ No environment values, access tokens, refresh tokens, or passwords were printed.
 
 No build artifacts, tooling, `.env`, real seed credentials, or database files
 belong in the pull request.
+
+## Pending P1 follow-up: comment Unicode validation
+
+After the verified baseline above, QA identified that JSON-escaped U+0000 in
+`result.comment` could reach PostgreSQL and incorrectly become retryable 503.
+A narrow pre-SQL `422 VALIDATION_ERROR` / `result.comment` / `INVALID_FORMAT`
+check was added. It also rejects unpaired UTF-16 surrogates without rejecting
+ordinary Unicode or valid supplementary-character pairs.
+
+New unit and HTTP+PostgreSQL regression sources cover repeated rejection with
+no result/status/revision/receipt change, absence of a receipt for rejected keys,
+and a corrected Unicode comment accepted with a new operation key. Decoder-level
+lone-surrogate rejection may be terminal 400; otherwise validation is 422.
+**These new regressions have NOT been run yet.** Android currently owns the only
+build slot. No Java/Gradle/PostgreSQL smoke was started for this follow-up; prior
+5+9 passing counts apply to the earlier baseline, not to the new tests.

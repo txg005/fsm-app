@@ -50,11 +50,30 @@ fun decimal(s: String, path: String): BigDecimal {
     if (n.precision() > 12) validation(path, "OUT_OF_RANGE")
     return n
 }
+// PostgreSQL text cannot store U+0000. Reject it before persistence rather than
+// turning terminal input into a retryable SQL failure. Reject unpaired UTF-16
+// surrogates too; ordinary Unicode, including valid supplementary pairs, is kept.
+fun validCommentUnicode(value: String): Boolean {
+    var index = 0
+    while (index < value.length) {
+        val ch = value[index]
+        if (ch == '\u0000') return false
+        if (Character.isHighSurrogate(ch)) {
+            if (index + 1 >= value.length || !Character.isLowSurrogate(value[index + 1])) return false
+            index += 2
+        } else {
+            if (Character.isLowSurrogate(ch)) return false
+            index++
+        }
+    }
+    return true
+}
 fun validateClose(r: CloseRequest, order: WorkOrder) {
     val v = r.result
     uuid(v.id); v.answers.forEach { uuid(it.itemId) }; v.photoIds.forEach(::uuid)
     if (r.baseRevision !in 1..9007199254740991L) malformed()
     if (!validInstant(v.capturedAt)) malformed()
+    if (!validCommentUnicode(v.comment)) validation("result.comment", "INVALID_FORMAT")
     if (v.comment.codePointCount(0, v.comment.length) > 4000) validation("result.comment", "TOO_LONG")
     if (v.photoIds.size > 10) validation("result.photoIds", "OUT_OF_RANGE")
     if (v.photoIds.toSet().size != v.photoIds.size) validation("result.photoIds", "DUPLICATE")
