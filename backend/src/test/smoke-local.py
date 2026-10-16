@@ -71,6 +71,9 @@ try:
                                       env=environment, stdout=log, stderr=log)
             for attempt in range(100):
                 if server.poll() is not None:
+                    diagnostic = root.parent / "tools" / "p1-smoke-startup.log"
+                    if diagnostic.parent.exists():
+                        diagnostic.write_bytes(pathlib.Path(log.name).read_bytes())
                     raise RuntimeError("server startup failed; no credentials printed")
                 try:
                     if request("GET", "/health")[0] == 200:
@@ -119,6 +122,18 @@ try:
             checks.append("multipart-private-binary-replay")
             body = fixtures["closeNoPhotoRequest"]
             body["result"]["photoIds"] = [photo["serverPhotoId"]]
+            rejected_key = str(uuid.uuid4())
+            invalid = json.loads(json.dumps(body))
+            invalid["result"]["comment"] = "before\u0000after"
+            for attempt in range(2):
+                rejected = request("POST", fixtures["close"]["path"], invalid, access, rejected_key)
+                assert rejected[0] == 422
+                error = json.loads(rejected[1])["error"]
+                assert error["code"] == "VALIDATION_ERROR" and error["retryable"] is False
+                assert error["details"]["fields"] == [{"path": "result.comment", "code": "INVALID_FORMAT"}]
+            unchanged = json.loads(request("GET", "/api/v1/work-orders/" + fixtures["ids"]["workOrder"], token=access)[1])
+            assert unchanged["status"] == "ASSIGNED" and unchanged["revision"] == 1 and unchanged["result"] is None
+            checks.append("escaped-null-terminal-no-order-effect")
             key = str(uuid.uuid4())
             close_path = fixtures["close"]["path"]
             closed = request("POST", close_path, body, access, key)

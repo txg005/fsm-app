@@ -6,14 +6,14 @@ No Android code, draft endpoints, registration, or create-work-order endpoint.
 
 ## Verification status
 
-The backend compiles on JDK17. The final sequential Gradle invocation passed
-`test`, `integrationTest`, and `installDist`: **5 unit + 9 real PostgreSQL tests,
-0 failures/errors/skips**. Real Netty HTTP smoke also passed. See `VERIFICATION.md`
-for exact commands, preceding failures, and limitations. The later QA comment-Unicode
-fix and its new regressions are currently **not rerun**; the 5+9 counts describe
-the verified baseline before that follow-up. This is backend
-verification, not full product acceptance: Docker and Android end-to-end were
-not tested here.
+The current backend, including the QA P1 comment-Unicode fix, compiles on JDK17.
+The latest forced sequential Gradle rerun passed `test`, `integrationTest`, and
+`installDist`: **6 unit + 10 real PostgreSQL tests, 0 failures/errors/skips**.
+The new unit and HTTP/PostgreSQL NUL regressions were executed, not skipped.
+Updated real Netty HTTP smoke also passed, including escaped-NUL rejection.
+See `VERIFICATION.md` for exact commands, earlier failed attempts, and limitations.
+This is backend verification, not full product acceptance: Docker and Android
+end-to-end were not tested here.
 
 ## Configuration
 

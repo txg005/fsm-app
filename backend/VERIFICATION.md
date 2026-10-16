@@ -21,7 +21,7 @@ from a generic build-success message.
 | `sh gradlew --no-daemon --no-parallel --max-workers=1 -Pkotlin.compiler.execution.strategy=in-process test integrationTest installDist --console=plain` | exit 0, final 5 unit + 9 PostgreSQL tests, installDist built |
 | `python3 src/test/smoke-local.py` | exit 0, actual Netty/HTTP/PostgreSQL smoke |
 
-Final XML totals: unit tests 5, failures 0, errors 0, skipped 0; integration tests
+Baseline XML totals: unit tests 5, failures 0, errors 0, skipped 0; integration tests
 9, failures 0, errors 0, skipped 0. `compileJava` and `compileTestJava` reported
 NO-SOURCE because this project is Kotlin; neither test suite was NO-SOURCE.
 Gradle forks a single-use JVM to honor the configured memory ceiling despite
@@ -76,18 +76,59 @@ No environment values, access tokens, refresh tokens, or passwords were printed.
 No build artifacts, tooling, `.env`, real seed credentials, or database files
 belong in the pull request.
 
-## Pending P1 follow-up: comment Unicode validation
+## Verified P1 follow-up: comment Unicode validation
 
-After the verified baseline above, QA identified that JSON-escaped U+0000 in
-`result.comment` could reach PostgreSQL and incorrectly become retryable 503.
-A narrow pre-SQL `422 VALIDATION_ERROR` / `result.comment` / `INVALID_FORMAT`
-check was added. It also rejects unpaired UTF-16 surrogates without rejecting
-ordinary Unicode or valid supplementary-character pairs.
+Code commit `1f6ea563a1cf6720e84e420bee73850d24c403b6` fixes QA's input-driven
+retry loop: JSON-escaped U+0000 in `result.comment` is rejected before persistence
+with `422 VALIDATION_ERROR` / `result.comment` / `INVALID_FORMAT`, rather than a
+retryable SQL error. Unpaired UTF-16 surrogates are rejected without restricting
+ordinary Unicode or valid supplementary-character pairs. Logging is unchanged.
 
-New unit and HTTP+PostgreSQL regression sources cover repeated rejection with
-no result/status/revision/receipt change, absence of a receipt for rejected keys,
-and a corrected Unicode comment accepted with a new operation key. Decoder-level
-lone-surrogate rejection may be terminal 400; otherwise validation is 422.
-**These new regressions have NOT been run yet.** Android currently owns the only
-build slot. No Java/Gradle/PostgreSQL smoke was started for this follow-up; prior
-5+9 passing counts apply to the earlier baseline, not to the new tests.
+A unit regression and an HTTP+real-PostgreSQL regression verify repeated rejection
+under the same operation key, no result/status/revision/receipt changes, no success
+receipt for rejected keys, and a corrected Unicode comment accepted with a new key.
+Lone surrogate is terminal 400 at decoding or 422 at validation, never SQL/503.
+
+### Actual rerun
+
+From `backend/`, with isolated JDK17 and test PostgreSQL environment supplied:
+
+```sh
+sh gradlew --no-daemon --no-parallel --max-workers=1 \
+  -Pkotlin.compiler.execution.strategy=in-process \
+  test integrationTest installDist --rerun-tasks --console=plain
+```
+
+**Exit 0; 9 actionable tasks executed.** XML totals: **6 unit + 10 PostgreSQL
+integration tests, failures 0, errors 0, skipped 0**. Both named new regression
+testcases appear in XML with no failure/error/skipped child. No baseline counts
+were substituted. Heap/metaspace remain 1024/384 MiB; one worker and in-process
+Kotlin compiler. No parallel Java/Gradle build was run.
+
+```sh
+python3 src/test/smoke-local.py
+```
+
+**Latest exit 0.** Actual installed Netty app and existing PG15 instance verified
+escaped-NUL close rejection twice with terminal 422 and exact field code,
+ASSIGNED/revision1/result-null preservation, then valid new-key close, replay,
+private JPEG, process restart, session revocation, and rate limit.
+
+### Earlier failures, not counted as passes
+
+- First P1 Gradle command without `--rerun-tasks` exited 1: all 10 integration
+  tests failed in setup with connection refused. The PostgreSQL OS packages and
+  running service were absent after environment reset; test logic was not reached.
+- Restored PostgreSQL15 packages and started the **existing** data directory at
+  port55432. No initdb, data-directory recreation, or cleanup was performed.
+  `pg_isready` then reported accepting connections. The forced full rerun above
+  passed after this infrastructure repair.
+- First updated standalone HTTP smoke exited 1 with generic startup failure;
+  it was not counted as passing. A subsequent complete run exited 0. The initial
+  transient startup cause was not established; no credential/body diagnostics
+  were printed. This remains an observed transient, not a claimed code fix.
+
+Docker/Compose/container volumes, deployment TLS, Android end-to-end, exhaustive
+fuzz/load testing, physical power loss, and actual response-loss-at-commit remain
+outside these verified results. The smoke API process was stopped on completion;
+test PostgreSQL remains available at55432. No merge performed.
