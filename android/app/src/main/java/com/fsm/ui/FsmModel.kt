@@ -54,7 +54,7 @@ class FsmModel(application:Application,private val saved:SavedStateHandle):Andro
         viewModelScope.launch {
             try { block() }
             catch(e:CancellationException) { throw e }
-            catch(e:Exception) { error=when(e) { is ApiFailure -> "Ошибка API: ${e.code}"; is InvalidInspection -> e.problems.joinToString("\n"); else -> "Операция не выполнена. Локальные данные сохранены; проверьте сеть/хранилище." } }
+            catch(e:Exception) { error=UiText.actionError(e) }
             finally { busy=false }
         }
     }
@@ -101,7 +101,7 @@ class FsmModel(application:Application,private val saved:SavedStateHandle):Andro
     fun sync() {
         error=null
         try { androidx.core.content.ContextCompat.startForegroundService(app,Intent(app,SyncService::class.java)) }
-        catch(_:Exception) { error="ОС не разрешила запуск Service. Очередь сохранена. Повторите из открытого приложения." }
+        catch(_:Exception) { error="Не удалось запустить передачу. Очередь сохранена. Повторите из открытого приложения." }
     }
     fun stopSync() { repo?.let { app.cancelBackground(it.employeeId) }; app.stopService(Intent(app,SyncService::class.java)) }
     fun refresh()=action { SyncGate.mutex.withLock { requireNotNull(repo).snapshot() } }
