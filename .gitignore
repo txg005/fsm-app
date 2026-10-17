@@ -1,0 +1,8 @@
+
+# Backend/runtime private data
+.env
+.env.*
+!.env.example
+backend/.gradle/
+backend/build/
+backend/photos/

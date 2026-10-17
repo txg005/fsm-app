@@ -1,0 +1,21 @@
+#!/bin/sh
+# Authentic Gradle-generated wrapper jar, losslessly encoded for text-only MCP delivery.
+# No credentials and no fabricated executable. Cache is outside the checkout.
+set -eu
+APP_HOME=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+EXPECTED=$(cat "$APP_HOME/gradle/wrapper/gradle-wrapper.jar.sha256")
+CACHE=${GRADLE_USER_HOME:-$HOME/.gradle}/fsm-wrapper/$EXPECTED
+mkdir -p "$CACHE"
+JAR="$CACHE/gradle-wrapper.jar"
+if [ ! -f "$JAR" ]; then
+  TMP=$(mktemp "$CACHE/.jar.XXXXXX")
+  trap 'rm -f "$TMP"' EXIT HUP INT TERM
+  base64 -d "$APP_HOME/gradle/wrapper/gradle-wrapper.jar.base64" > "$TMP"
+  printf '%s  %s\n' "$EXPECTED" "$TMP" | sha256sum -c - >/dev/null
+  mv "$TMP" "$JAR"
+fi
+printf '%s  %s\n' "$EXPECTED" "$JAR" | sha256sum -c - >/dev/null
+# Wrapper locates its properties alongside its jar.
+cp "$APP_HOME/gradle/wrapper/gradle-wrapper.properties" "$CACHE/gradle-wrapper.properties"
+if [ -n "${JAVA_HOME:-}" ]; then JAVA="$JAVA_HOME/bin/java"; else JAVA=java; fi
+exec "$JAVA" -Xmx64m -Xms64m -Dorg.gradle.appname=gradlew -classpath "$JAR" org.gradle.wrapper.GradleWrapperMain -p "$APP_HOME" "$@"
