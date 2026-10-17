@@ -63,14 +63,20 @@ fun parseMultipart(contentType: String, bytes: ByteArray): Upload {
             val colon=line.indexOf(':'); if(colon<1) malformed()
             line.substring(0,colon).lowercase() to line.substring(colon+1).trim()
         }
-        if(headers.map { it.first }.distinct().size != headers.size || headers.any { it.first !in setOf("content-disposition","content-type") }) malformed()
+        if(headers.map { it.first }.distinct().size != headers.size || headers.any { it.first !in setOf("content-disposition","content-type","content-length") }) malformed()
         val map=headers.toMap()
         val disposition=try { ContentDisposition.parse(map["content-disposition"] ?: malformed()) } catch(_: Exception) { malformed() }
         val mime=try { ContentType.parse(map["content-type"] ?: malformed()) } catch(_: Exception) { malformed() }
         if(disposition.disposition != "form-data" || disposition.name != name || !mime.match(type)) malformed()
         if(name=="metadata" && disposition.parameter("filename") != null) malformed()
         if(name=="file" && disposition.parameter("filename")==null) malformed()
-        return rawPart.substring(index+4).toByteArray(Charsets.ISO_8859_1)
+        val body=rawPart.substring(index+4).toByteArray(Charsets.ISO_8859_1)
+        // Ktor 3.1.3 emits a per-part Content-Length for both String and ByteArray.
+        // It is optional MIME metadata, not a replacement for our actual byte limits.
+        map["content-length"]?.let { declared ->
+            if(!Regex("[0-9]+").matches(declared) || declared.toLongOrNull()!=body.size.toLong()) malformed()
+        }
+        return body
     }
     val metadataBytes=part(parts[0],"metadata",ContentType.Application.Json)
     if(metadataBytes.size>4096) malformed()

@@ -20,6 +20,7 @@ dependencies {
     runtimeOnly("ch.qos.logback:logback-classic:1.5.18")
     testImplementation(kotlin("test"))
     testImplementation("io.ktor:ktor-server-test-host-jvm:$ktor")
+    testImplementation("io.ktor:ktor-client-core-jvm:$ktor")
     testImplementation("org.junit.jupiter:junit-jupiter:5.12.2")
 }
 kotlin { jvmToolchain(17) }
