@@ -9,6 +9,7 @@ import os
 import pathlib
 import secrets
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -107,13 +108,17 @@ try:
             checks.append("strict-json-request-limit")
             upload = fixtures["photoUpload"]
             multipart = base64.b64decode(upload["multipartBodyBase64"])
+            multipart_type = upload["headers"]["Content-Type"]
+            if "--ktor-multipart" in sys.argv:
+                multipart = (root / "build/ktor-multipart.body").read_bytes()
+                multipart_type = (root / "build/ktor-multipart.content-type").read_text()
             path = upload["path"]
             key = str(uuid.uuid4())
             one = request("POST", path, multipart, access, key,
-                          upload["headers"]["Content-Type"])
+                          multipart_type)
             assert one[0] == 201
             two = request("POST", path, multipart, access, key,
-                          upload["headers"]["Content-Type"])
+                          multipart_type)
             assert one[:2] == two[:2]
             photo = json.loads(one[1])["photo"]
             status, binary, headers = request("GET", photo["contentPath"], token=access)

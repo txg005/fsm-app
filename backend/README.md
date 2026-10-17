@@ -8,9 +8,11 @@ No Android code, draft endpoints, registration, or create-work-order endpoint.
 
 The current backend, including the QA P1 comment-Unicode fix, compiles on JDK17.
 The latest forced sequential Gradle rerun passed `test`, `integrationTest`, and
-`installDist`: **6 unit + 10 real PostgreSQL tests, 0 failures/errors/skips**.
+`installDist`: **9 unit + 11 real PostgreSQL tests, 0 failures/errors/skips**.
 The new unit and HTTP/PostgreSQL NUL regressions were executed, not skipped.
-Updated real Netty HTTP smoke also passed, including escaped-NUL rejection.
+Updated real Netty HTTP smoke also passed, including escaped-NUL rejection and
+actual Ktor 3.1.3 multipart bytes. See `MULTIPART-INCIDENT.md` for the reproduced
+photo-upload defect, fix, Windows server update, and existing-APK recovery.
 See `VERIFICATION.md` for exact commands, earlier failed attempts, and limitations.
 This is backend verification, not full product acceptance: Docker and Android
 end-to-end were not tested here.
