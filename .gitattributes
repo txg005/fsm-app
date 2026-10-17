@@ -1,0 +1,10 @@
+# Keep launchers usable regardless of core.autocrlf (only these build files).
+/android/gradlew text eol=lf
+/backend/gradlew text eol=lf
+/android/gradlew.bat text eol=crlf
+/backend/gradlew.bat text eol=crlf
+/android/gradle/wrapper/* text eol=lf
+/backend/gradle/wrapper/* text eol=lf
+/android/gradle/wrapper/*.jar binary
+/backend/gradle/wrapper/*.jar binary
+/docs/BUILD-WINDOWS.md text eol=lf
