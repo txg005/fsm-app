@@ -1,0 +1,18 @@
+#!/bin/sh
+# Pinned distribution launcher, not a fabricated Gradle wrapper JAR.
+set -eu
+VERSION=8.13
+SHA=20f1b1176237254a6fc204d8434196fa11a4cfb387567519c61556e8710aed78
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+CACHE="${GRADLE_USER_HOME:-$HOME/.gradle}/fsm-distributions"
+if [ ! -x "$CACHE/gradle-$VERSION/bin/gradle" ]; then
+  mkdir -p "$CACHE"
+  ZIP=$(mktemp "$CACHE/gradle.XXXXXX.zip")
+  trap 'rm -f "$ZIP"' EXIT HUP INT TERM
+  curl --fail --location --retry 2 "https://services.gradle.org/distributions/gradle-$VERSION-bin.zip" -o "$ZIP"
+  printf '%s  %s\n' "$SHA" "$ZIP" | sha256sum -c -
+  unzip -q -o "$ZIP" -d "$CACHE"
+  rm -f "$ZIP"
+  trap - EXIT HUP INT TERM
+fi
+exec "$CACHE/gradle-$VERSION/bin/gradle" -p "$ROOT" "$@"
