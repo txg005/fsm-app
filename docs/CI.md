@@ -49,9 +49,27 @@ unchanged (existing warnings are not claimed fixed).
 Reports and Android APKs are uploaded even after failures, when generated, with
 7-day retention. Artifacts are evidence, not proof that all checks passed;
 missing artifacts warn and do not turn a failed step green. The gate also writes
-actual XML counts to the job summary and public notice annotations; failures
-include failing testcase names in error annotations even if raw logs require
-authentication. Check both Gradle and report-gate results.
+actual testcase-entry counts (`tests`, `failure`, `error`, `skips`) to the job
+summary and public notice annotations, including before rejecting a failed suite.
+Counts come from testcase children, not untrusted suite-total attributes; duplicate
+entries remain counted and every bad entry fails the gate. Baseline names are
+still checked as a set; duplicates cannot replace a missing required name.
+
+For up to 20 bad entries per suite, error annotations/summary include the status,
+allowlisted classname/method and exception type (otherwise `unknown`), category
+`assertion`/`timeout`/`other`, and at most three unique `com.fsm.*` test-owned stack
+frames. Frames must name a matching `*Test.kt`/`*Test.java` class/file and a positive
+line number; only the first 64 KiB of each failure/error/skipped text is inspected.
+No raw exception messages, complete stacks, nested XML text, system-out, requests,
+credentials or photo/GPS/comment data are emitted by this diagnostic helper.
+Identifiers are ASCII syntax/length allowlisted; each output is capped at 1000
+characters and workflow-command data is escaped. Unsupported names/frames are
+omitted or labelled `unknown`, never printed raw. Additional bad entries are
+explicitly reported as truncated, not ignored by the gate. GitHub may show fewer
+annotations than emitted; the step summary/artifact remains the fallback. This
+does not sanitize Gradle's own logs or the existing report artifacts. Check both
+Gradle and report-gate results; backend/JVM gates run only after their build step
+succeeds, while the device gate also runs after a non-cancelled test failure.
 No user `.env`, local credentials, tokens, production DBs or private device data
 are read, cached or uploaded. Never broaden artifacts to the whole checkout,
 Gradle home or environment dumps.
@@ -94,6 +112,6 @@ maintainer action, report that blocker without merging to activate CI.
 - [GitHub workflow syntax and permissions](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax)
 - [Workflow run read API](https://docs.github.com/en/rest/actions/workflow-runs)
 - [setup-java v5](https://github.com/actions/setup-java/tree/b6effb05e454b25005698d916606bdc6ffcbf961)
-- [checkout v6](https://github.com/actions/checkout/tree/d23441a48e516b6c34aea4fa41551a30e30af803)
+- [checkout v6](https://github.com/actions/checkout/tree/d23441a48e516b6c34aea4fa41551a30eaf803)
 - [upload-artifact v6](https://github.com/actions/upload-artifact/tree/b7c566a772e6b6bfb58ed0dc250532a479d7789f)
 - [Android emulator runner v2.34.0, KVM and supported inputs](https://github.com/ReactiveCircus/android-emulator-runner/tree/1dcd0090116d15e7c562f8db72807de5e036a4ed)
