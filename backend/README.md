@@ -53,8 +53,13 @@ The launcher bootstraps the genuine Gradle8.14.3 wrapper JAR from its pinned off
 For Compose, from the repository root:
 
 ```sh
-# First setup only: if .env already exists, do NOT overwrite it.
-cp .env.example .env
+# First setup only: never overwrite an existing .env (including symlinks).
+if [ -e .env ] || [ -L .env ]; then
+  printf '%s\n' '.env already exists; keep it unchanged. Stop here and review it privately.' >&2
+  exit 1
+fi
+# Noclobber also refuses a file created after the check above.
+(set -C; cat .env.example > .env) || exit 1
 # Edit .env privately; replace every placeholder. Never commit it.
 docker compose config --quiet
 docker compose up --build -d
