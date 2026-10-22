@@ -1,6 +1,10 @@
 package com.fsm
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Color
+import androidx.exifinterface.media.ExifInterface
 import androidx.room.Room
 import androidx.room.withTransaction
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -110,18 +114,110 @@ class RoomTest {
     }
     @Test fun importCorrectsExifBeforeStripping()=runBlocking {
         validDraft()
-        val source=File(context.cacheDir,"exif-test.jpg")
-        val bitmap=android.graphics.Bitmap.createBitmap(12,8,android.graphics.Bitmap.Config.ARGB_8888)
+        // Expected output corners: top-left, top-right, bottom-left, bottom-right.
+        // Independent landmarks catch skipped/double rotations and wrong mirror transforms.
+        val r=Color.RED; val g=Color.GREEN; val b=Color.BLUE; val y=Color.YELLOW
+        val corners=listOf(
+            listOf(r,g,b,y), listOf(g,r,y,b), listOf(y,b,g,r), listOf(b,y,r,g),
+            listOf(r,b,g,y), listOf(b,r,y,g), listOf(y,g,b,r), listOf(g,y,r,b)
+        )
+        val importedPhotoIds=mutableSetOf<String>()
+        for(orientation in 1..8) {
+            val source=File(context.cacheDir,"exif-test-$orientation.jpg")
+            try {
+                writePhotoFixture(source)
+                ExifInterface(source.path).apply {
+                    setAttribute(ExifInterface.TAG_ORIENTATION,orientation.toString())
+                    photoMetadata.forEach { (tag,value) -> setAttribute(tag,value) }
+                    setLatLong(12.25,34.5) // Synthetic coordinates, never a device location.
+                    saveAttributes()
+                }
+                val input=ExifInterface(source.path)
+                assertEquals(orientation,input.getAttributeInt(ExifInterface.TAG_ORIENTATION,-1))
+                photoMetadata.forEach { (tag,value) -> assertEquals("Fixture $tag",value,input.getAttribute(tag)) }
+                val gps=requireNotNull(input.latLong)
+                assertEquals(12.25,gps[0],0.000001); assertEquals(34.5,gps[1],0.000001)
+                assertTrue("Fixture must really contain EXIF APP1",jpegHeaderMarkers(source.readBytes()).contains(0xe1))
+
+                Media.importPhoto(context,repo,order.id,android.net.Uri.fromFile(source))
+                val stored=db.store().photos(order.id).single { it.id !in importedPhotoIds }
+                importedPhotoIds.add(stored.id)
+                val swapped=orientation>=5
+                assertSanitizedPhoto(stored,if(swapped) 48 else 80,if(swapped) 80 else 48,corners[orientation-1])
+            } finally {source.delete()}
+        }
+    }
+    @Test fun importWithoutExifPreservesUprightPixelsAndFinalHash()=runBlocking {
+        validDraft()
+        val source=File(context.cacheDir,"no-exif-test.jpg")
         try {
-            source.outputStream().use {bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG,90,it)}
-            androidx.exifinterface.media.ExifInterface(source.path).apply {setAttribute(androidx.exifinterface.media.ExifInterface.TAG_ORIENTATION,"6");saveAttributes()}
+            writePhotoFixture(source)
+            assertFalse("Fixture must have no EXIF APP1",jpegHeaderMarkers(source.readBytes()).contains(0xe1))
             Media.importPhoto(context,repo,order.id,android.net.Uri.fromFile(source))
-            val stored=db.store().photos(order.id).single()
-            val options=android.graphics.BitmapFactory.Options().apply {inJustDecodeBounds=true}
-            android.graphics.BitmapFactory.decodeFile(stored.localPath,options)
-            assertEquals(8,options.outWidth); assertEquals(12,options.outHeight)
-            assertEquals(1,androidx.exifinterface.media.ExifInterface(stored.localPath!!).getAttributeInt(androidx.exifinterface.media.ExifInterface.TAG_ORIENTATION,1))
-        } finally {bitmap.recycle();source.delete()}
+            assertSanitizedPhoto(db.store().photos(order.id).single(),80,48,listOf(Color.RED,Color.GREEN,Color.BLUE,Color.YELLOW))
+        } finally {source.delete()}
+    }
+    private val photoMetadata=mapOf(
+        ExifInterface.TAG_MAKE to "FSM_TEST_CAMERA",
+        ExifInterface.TAG_MODEL to "FSM_TEST_MODEL",
+        ExifInterface.TAG_USER_COMMENT to "FSM_TEST_METADATA",
+        ExifInterface.TAG_DATETIME_ORIGINAL to "2026:01:02 03:04:05"
+    )
+    private fun writePhotoFixture(source:File) {
+        val bitmap=Bitmap.createBitmap(80,48,Bitmap.Config.ARGB_8888)
+        val colors=listOf(Color.RED,Color.GREEN,Color.BLUE,Color.YELLOW)
+        try {
+            for(y in 0 until bitmap.height) for(x in 0 until bitmap.width) {
+                bitmap.setPixel(x,y,colors[(if(y<24) 0 else 2)+(if(x<40) 0 else 1)])
+            }
+            source.outputStream().use {assertTrue(bitmap.compress(Bitmap.CompressFormat.JPEG,95,it))}
+        } finally {bitmap.recycle()}
+    }
+    private fun assertSanitizedPhoto(photo:Photo,width:Int,height:Int,corners:List<Int>) {
+        val file=File(requireNotNull(photo.localPath)); val bytes=file.readBytes()
+        assertEquals("Room byteSize must describe final JPEG",bytes.size.toLong(),photo.byteSize)
+        assertEquals("Room hash must describe final JPEG",sha256(bytes),photo.sha256)
+        assertFalse("Imported JPEG must not retain APP1 metadata",jpegHeaderMarkers(bytes).contains(0xe1))
+        val exif=ExifInterface(file.path)
+        // AndroidX 1.4.1 synthesizes UNDEFINED (0) when the orientation tag is absent.
+        // Pixels, not a residual metadata transform, must already be upright.
+        val orientation=exif.getAttributeInt(ExifInterface.TAG_ORIENTATION,ExifInterface.ORIENTATION_UNDEFINED)
+        assertTrue("No remaining orientation transform: $orientation",orientation in listOf(ExifInterface.ORIENTATION_UNDEFINED,ExifInterface.ORIENTATION_NORMAL))
+        photoMetadata.keys.forEach {tag -> assertNull("Must strip $tag",exif.getAttribute(tag))}
+        assertNull("Must strip GPS latitude",exif.getAttribute(ExifInterface.TAG_GPS_LATITUDE))
+        assertNull("Must strip GPS longitude",exif.getAttribute(ExifInterface.TAG_GPS_LONGITUDE))
+        assertNull("No GPS fix may survive",exif.latLong)
+        val bitmap=requireNotNull(BitmapFactory.decodeFile(file.path))
+        try {
+            assertEquals(width,bitmap.width); assertEquals(height,bitmap.height)
+            val points=listOf(width/4 to height/4,3*width/4 to height/4,width/4 to 3*height/4,3*width/4 to 3*height/4)
+            points.forEachIndexed { index,(x,y) ->
+                val actual=bitmap.getPixel(x,y); val expected=corners[index]
+                // Sample away from boundaries; allow bounded loss from two JPEG encodes.
+                assertEquals("Corner $index red",Color.red(expected).toDouble(),Color.red(actual).toDouble(),50.0)
+                assertEquals("Corner $index green",Color.green(expected).toDouble(),Color.green(actual).toDouble(),50.0)
+                assertEquals("Corner $index blue",Color.blue(expected).toDouble(),Color.blue(actual).toDouble(),50.0)
+            }
+        } finally {bitmap.recycle()}
+    }
+    /** Walk length-delimited JPEG headers only; entropy-coded scan bytes are not markers. */
+    private fun jpegHeaderMarkers(bytes:ByteArray):List<Int> {
+        fun unsigned(index:Int)=bytes[index].toInt() and 0xff
+        assertTrue("JPEG SOI",bytes.size>=2 && unsigned(0)==0xff && unsigned(1)==0xd8)
+        val markers=mutableListOf<Int>(); var offset=2
+        while(offset<bytes.size) {
+            assertEquals("JPEG marker prefix",0xff,unsigned(offset++))
+            while(offset<bytes.size && unsigned(offset)==0xff) offset++
+            assertTrue("JPEG marker present",offset<bytes.size)
+            val marker=unsigned(offset++)
+            if(marker==0xda || marker==0xd9) return markers
+            assertTrue("JPEG segment length present",offset+2<=bytes.size)
+            val length=(unsigned(offset) shl 8) or unsigned(offset+1)
+            assertTrue("JPEG segment bounds",length>=2 && length<=bytes.size-offset)
+            markers.add(marker); offset+=length
+        }
+        fail("JPEG missing scan/end marker")
+        return markers
     }
 
     private fun fixture():JsonObject=wire.parseToJsonElement(InstrumentationRegistry.getInstrumentation().context.assets.open("contract-fixtures.json").bufferedReader().use {it.readText()}).jsonObject
