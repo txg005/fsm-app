@@ -1,12 +1,12 @@
-# FSM Android — implementation WIP, not accepted on device
+# FSM Android — API v1.0
 
-Independent build root. Implements frozen API v1.0 at `88d8f3ed1444e4fade6ac71faa36e541b157eba1`; no backend draft endpoints. This PR is draft: final verification results below must not be read as device acceptance.
+Independent build root. Implements frozen API v1.0 at `88d8f3ed1444e4fade6ac71faa36e541b157eba1`; no backend draft endpoints. Current CI/user evidence and remaining acceptance limits: [ACCEPTANCE](../docs/ACCEPTANCE.md). Earlier local verification below is retained as baseline history, not the current CI status.
 
 ## Toolchain and run
 
 Pinned: JDK17, Gradle8.13, AGP8.10.1, Kotlin/Compose plugin2.1.21, Compose BOM2025.05.01, KSP2.1.21-2.0.1, Room2.7.1, Ktor3.1.3, Coroutines1.10.2, WorkManager2.10.1, AndroidX EXIF1.4.1; minSdk26, compile/target36, build-tools36.0.0.
 
-Install JDK17 and Android SDK (`platforms;android-36`, `build-tools;36.0.0`, `platform-tools`), accept SDK licenses, set `JAVA_HOME` and `ANDROID_HOME`. `gradlew` is explicitly a small Linux distribution launcher with the official Gradle8.13 SHA256, not a standard binary wrapper: run with `sh` (GitHub MCP does not preserve executable bits). No fake wrapper jar or APK is included. It downloads the pinned public distribution to Gradle's user cache. Alternatively use an installed Gradle8.13.
+Install JDK17 and Android SDK (`platforms;android-36`, `build-tools;36.0.0`, `platform-tools`), accept SDK licenses, set `JAVA_HOME` and `ANDROID_HOME`. `gradlew` now bootstraps the genuine SHA-pinned Gradle8.13 wrapper JAR beside its properties and checks it before Java; the distribution checksum is pinned too. Run `sh gradlew` on Linux (curl/sha256sum/mktemp/tr required); on Windows use `gradlew.bat`/PowerShell5.1. Prepare the JAR before opening Android Studio and select JDK17: [Windows/bootstrap guide](../docs/BUILD-WINDOWS.md). No system Gradle, GNU base64 or fabricated JAR is required.
 
 ```sh
 cd android
@@ -14,6 +14,7 @@ sh gradlew --no-daemon --no-parallel --max-workers=1 testDebugUnitTest lintDebug
 sh gradlew --no-daemon --max-workers=1 :app:assembleDebugAndroidTest
 # Requires an actual connected device/emulator:
 sh gradlew connectedDebugAndroidTest
+# Only after checking compatible package/version AND the same signing certificate:
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
@@ -33,6 +34,8 @@ Access token only memory; refresh ciphertext AES-GCM with non-exportable Android
 
 ## Demo (manual acceptance still required)
 
+Use the current [5–10 minute guide](../docs/DEMO.md), especially assigned-order availability and APK signature prerequisites. The following checklist is a baseline scenario, not proof that any seeded order remains ASSIGNED.
+
 1. Start backend from its own README; login, load snapshot, open seeded assigned work order.
 2. Start inspection, check required items and valid reading, edit comment. Delete draft to demonstrate CRUD, then recreate.
 3. Turn off network; add optional camera/picker photo; close. Deny location to exercise valid MISSING. Observe QUEUED rather than CLOSED.
@@ -40,7 +43,11 @@ Access token only memory; refresh ciphertext AES-GCM with non-exportable Android
 5. After server ACK see CLOSED and retained photo localPath. Repeat sync: no second close. Separately test lost response after server commit, expired auth, changed server revision, two accounts.
 6. Rotate all five screens with keyboard and while capture/upload. Exercise notifications denied, location approximate/disabled, FGS timeout and Settings force-stop; reopen to resume.
 
-## Verification status
+## Current status
+
+Main `0c3f0ed…`, [CI run39741466813](https://github.com/txg005/fsm-app/actions/runs/39741466813): **25 JVM +15 executed Room/media/engine instrumentation tests, 0 failures/errors/skips; API36/KVM, lint0errors/19warnings, both APKs built**. Instrumentation uses mock HTTP, not a real server or full UI rotation suite. User separately reported successful Windows builds and emulator photo/GPS +confirmed CLOSED in the new UI. Full landscape/recreation/physical-device acceptance remains pending; see [ACCEPTANCE](../docs/ACCEPTANCE.md). CI debug APKs may have a different signing certificate: do not uninstall/clear data to force installation.
+
+## Historical local verification (before CI)
 
 Environment initially supplied Java25 and no Gradle/SDK/device. Isolated JDK17/Gradle8.13/SDK36 installed under `/data/fsm-android-work/tools` (not committed). Earlier unbounded/concurrent attempts were interrupted after sandbox resource pressure; they are not counted as successful checks. Bounded verification uses one Gradle process, one worker, in-process Kotlin compiler, heap1024m/metaspace512m/ActiveProcessorCount2.
 
@@ -68,8 +75,8 @@ Artifacts (local only, not committed): `app/build/outputs/apk/debug/app-debug.ap
 
 ## Known remaining risks / unverified
 
-- No physical/emulator camera/GPS/permissions/landscape/FGS/Keystore test and no end-to-end real-backend run yet. Test APK compilation is not execution.
-- Room schema is version1; no upgrade migration is claimed. Instrumentation tests must run before acceptance.
+- User reported an emulator/live-backend photo/GPS/CLOSED flow; CI executed15 instrumentation tests. Physical-device coverage and the full camera/GPS/permissions/landscape/FGS/Keystore matrix remain unverified.
+- Room schema is version1; no upgrade migration is claimed. Executed CI instrumentation is one API36 emulator configuration, not a full acceptance matrix.
 - Filesystem and Room are not one atomic transaction. Account photo-directory orphan sweep runs on repository observation under the same process-wide media Mutex as import/download; only app-generated UUID jpg/tmp/download files absent from Room are removed. Registered queued/acknowledged photos are never swept. Camera scratch files are removed on result/cancel; a crash without callback can leave a private scratch file (no automatic scratch expiry yet).
 - Server photos from another client are marked unavailable offline until explicit authenticated download; thumbnails are local. EXIF orientation/mirroring is applied before JPEG re-encode/stripping, but real-device camera/provider format coverage is not verified.
-- UI is intentionally minimal, no merge editor/push/background GPS/create-work-order API. Device process-stop scenarios, concurrent account switching and explicit conflict resolution need acceptance testing. The three initial QA P1 paths (stale canonical choice, split conflict transition, malformed-success permanent failure) have targeted code/regression fixes; Room/process-death behavior remains compiled-only and must be exercised on-device before acceptance. No claim of full MVP acceptance is made.
+- UI is intentionally minimal, no merge editor/push/background GPS/create-work-order API. Device process-stop scenarios, concurrent account switching and explicit conflict resolution need acceptance testing. The three initial QA P1 paths (stale canonical choice, split conflict transition, malformed-success permanent failure) have targeted code/regression fixes; Room/engine regression tests have now executed in CI; actual UI/process-lifecycle acceptance beyond that suite remains separate. No claim of full MVP acceptance is made.

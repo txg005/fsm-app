@@ -14,8 +14,8 @@ Updated real Netty HTTP smoke also passed, including escaped-NUL rejection and
 actual Ktor 3.1.3 multipart bytes. See `MULTIPART-INCIDENT.md` for the reproduced
 photo-upload defect, fix, Windows server update, and existing-APK recovery.
 See `VERIFICATION.md` for exact commands, earlier failed attempts, and limitations.
-This is backend verification, not full product acceptance: Docker and Android
-end-to-end were not tested here.
+This is backend verification, not full product acceptance: the original local run did not test Docker or Android
+end-to-end. Current [main CI run39741466813](https://github.com/txg005/fsm-app/actions/runs/39741466813) also passed9unit+11PG/installDist. The user separately reported Windows wrapper/backend test+installDist, Compose and emulator photo/GPS/CLOSED success; these are user reports, not a Docker/Windows automated matrix. See [ACCEPTANCE](../docs/ACCEPTANCE.md).
 
 ## Configuration
 
@@ -48,17 +48,12 @@ sh gradlew --no-daemon --no-parallel --max-workers=1 installDist
 build/install/fsm-backend/bin/fsm-backend
 ```
 
-The genuine Gradle 8.14.3 generated wrapper jar is losslessly stored as
-`gradle/wrapper/gradle-wrapper.jar.base64` because GitHub MCP accepts text files.
-`gradlew` decodes it outside the checkout, verifies its pinned SHA-256, and runs
-the real `GradleWrapperMain`. The distribution checksum is pinned too.
-Use `sh gradlew`: text-only MCP publishing cannot set the executable bit.
-The bootstrap requires GNU `base64` and `sha256sum` (Linux). The Docker build
-uses the pinned Gradle image and does not need that bootstrap.
+The launcher bootstraps the genuine Gradle8.14.3 wrapper JAR from its pinned official HTTPS source beside `gradle/wrapper/gradle-wrapper.properties`, verifies SHA-256 before installation and each launcher run, then runs `GradleWrapperMain`. Distribution checksum is pinned too. Use `sh gradlew` on Linux (curl/sha256sum/mktemp/tr); Windows uses `gradlew.bat`/PowerShell5.1. The historical `.base64` file is no longer used. See [Windows/bootstrap guide](../docs/BUILD-WINDOWS.md); Docker uses its pinned Gradle image, not the host launcher.
 
 For Compose, from the repository root:
 
 ```sh
+# First setup only: if .env already exists, do NOT overwrite it.
 cp .env.example .env
 # Edit .env privately; replace every placeholder. Never commit it.
 docker compose config --quiet
@@ -123,9 +118,10 @@ messages are logged. `X-Request-Id` is server generated.
 
 ## Remaining verification
 
-Docker image build/Compose health checks, named-volume/container restart durability,
-deployment TLS/reverse-proxy behavior, Android end-to-end, exhaustive adversarial
-JPEG/multipart fuzzing, and abrupt power-loss durability remain unverified.
+User-reported Windows Compose/emulator operation is recorded in ACCEPTANCE.
+Formal named-volume/container restart durability, deployment TLS/reverse-proxy
+behavior, the full Android end-to-end matrix, exhaustive adversarial JPEG/multipart
+fuzzing and abrupt power-loss durability remain unverified.
 The PostgreSQL tests include fault injection after rename and before receipt;
 these are simulations, not proof of physical disk power-loss behavior.
 
