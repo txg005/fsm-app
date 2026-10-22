@@ -49,9 +49,40 @@ unchanged (existing warnings are not claimed fixed).
 Reports and Android APKs are uploaded even after failures, when generated, with
 7-day retention. Artifacts are evidence, not proof that all checks passed;
 missing artifacts warn and do not turn a failed step green. The gate also writes
-actual XML counts to the job summary and public notice annotations; failures
-include failing testcase names in error annotations even if raw logs require
-authentication. Check both Gradle and report-gate results.
+actual testcase-entry counts (`tests`, `failure`, `error`, `skips`) to the job
+summary and public notice annotations, including before rejecting a failed suite.
+Counts come from testcase children, not untrusted suite-total attributes; duplicate
+entries remain counted and every bad entry fails the gate. Baseline names are
+still checked as a set; duplicates cannot replace a missing required name.
+
+For up to 20 bad entries per suite, error annotations/summary include the status,
+allowlisted classname/method and exception type (otherwise `unknown`), and category
+`assertion`/`timeout`/`other`. At most three unique source locations are emitted
+from an explicit class/file mapping: `com.fsm.RoomTest` / `RoomTest.kt`,
+`com.fsm.ContractTest` / `ContractTest.kt`, `com.fsm.ui.UiTextTest` / `UiTextTest.kt`,
+and `com.fsm.ui.LifecycleUiTest` / `LifecycleUiTest.kt` (the latter from PR9).
+Only these constant class/file labels and a positive line number (1–9999999)
+appear in frame output; report-supplied frame methods and synthetic suffixes are
+not echoed. Other owners/files, including invented or malformed packages, are
+omitted. No backend frames are currently mapped. Only the first 65536 Python
+characters of each status node's direct text are scanned; full XML is parsed first.
+
+The helper does not echo raw exception messages, complete stacks, nested XML or
+system-out. Identifier fields still come from untrusted XML after ASCII syntax
+and length checks: this is not source authentication or a guarantee that a valid
+identifier/line number cannot encode private data. Never put real private data
+in test identifiers or reports. Each output is capped at 1000 characters before
+workflow-command data escaping; unsupported identifiers become `unknown`.
+Additional bad entries are explicitly reported as truncated, not ignored by the
+gate. Unknown codecs/malformed XML fail with fixed errors without parser text.
+If summary writing fails, the gate exits nonzero with one fixed console error,
+without reopening that sink or printing the exception/path.
+
+GitHub may show fewer annotations than emitted; the summary/artifact remains the
+fallback when available. This does not sanitize Gradle's own logs or the existing
+report artifacts. Check both Gradle and report-gate results; backend/JVM gates run
+only after their build step succeeds, while the device gate also runs after a
+non-cancelled test failure.
 No user `.env`, local credentials, tokens, production DBs or private device data
 are read, cached or uploaded. Never broaden artifacts to the whole checkout,
 Gradle home or environment dumps.
@@ -65,7 +96,7 @@ GitHub approval; their cache writes are scoped by GitHub's PR cache isolation.
 Treat all PR reports/APKs as untrusted artifacts. Actions are immutable commit
 pins; do not replace them with moving tags without review.
 
-Setup-java caches Gradle dependencies keyed by the relevant build files; test
+Setup-java caches Gradle dependencies keyed keyed by the relevant build files; test
 outputs/APKs/AVDs are not reused as test evidence. No AVD snapshots are cached.
 Gradle has one worker/no parallel tasks, respecting existing heap limits.
 Concurrency cancels superseded runs for the same PR/ref. The three jobs run on
