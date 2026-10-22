@@ -39,7 +39,8 @@ def check(kind):
                                            for tag in ('failure', 'error', 'skipped'))]
         if bad or len(cases) < minimum:
             raise ValueError(f'{pattern}: {len(cases)} executed entries, '
-                             f'{len(bad)} failed/error/skipped; need >= {minimum}, all passed')
+                             f'{len(bad)} failed/error/skipped; need >= {minimum}, all passed; '
+                             f'bad cases: {[case.get("classname", "") + "." + case.get("name", "") for case in bad]}')
         if kind == 'instrumentation':
             names = {case.get('name') for case in cases
                      if case.get('classname') == 'com.fsm.RoomTest'}
@@ -48,6 +49,7 @@ def check(kind):
                 raise ValueError(f'Missing baseline instrumentation cases: {sorted(missing)}')
         message = f'{pattern}: {len(cases)} tests, 0 failures/errors/skips'
         print(message)
+        print(f'::notice::{message}')
         if os.environ.get('GITHUB_STEP_SUMMARY'):
             with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
                 summary.write(f'- {message}\n')
@@ -57,4 +59,6 @@ if __name__ == '__main__':
     try:
         check(sys.argv[1])
     except (IndexError, KeyError, ValueError, ET.ParseError) as error:
+        message = str(error).replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+        print(f'::error::{message}')
         sys.exit(f'Report gate failed: {error}')

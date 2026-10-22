@@ -3,7 +3,7 @@
 ## Scope and commands
 
 `.github/workflows/verification.yml` runs on every pull request (including draft
-PRs), pushes to `main` and `feature/ci-verification`, and manual dispatch once
+PRs), pushes to `main`, and manual dispatch once
 GitHub exposes the workflow on the default branch. No merge is required for a PR
 run. There are no path filters, so every PR receives the same three checks.
 
@@ -49,7 +49,9 @@ unchanged (existing warnings are not claimed fixed).
 Reports and Android APKs are uploaded even after failures, when generated, with
 7-day retention. Artifacts are evidence, not proof that all checks passed;
 missing artifacts warn and do not turn a failed step green. The gate also writes
-actual XML counts to the job summary. Check both Gradle and report-gate results.
+actual XML counts to the job summary and public notice annotations; failures
+include failing testcase names in error annotations even if raw logs require
+authentication. Check both Gradle and report-gate results.
 No user `.env`, local credentials, tokens, production DBs or private device data
 are read, cached or uploaded. Never broaden artifacts to the whole checkout,
 Gradle home or environment dumps.
@@ -67,9 +69,9 @@ Setup-java caches Gradle dependencies keyed by the relevant build files; test
 outputs/APKs/AVDs are not reused as test evidence. No AVD snapshots are cached.
 Gradle has one worker/no parallel tasks, respecting existing heap limits.
 Concurrency cancels superseded runs for the same PR/ref. The three jobs run on
-separate hosted runners, not on the shared 4GB development sandbox. Initial
-branch push and PR-open can briefly produce duplicate runs; subsequent PR pushes
-share the PR concurrency group. Standard public-repository runners are in scope;
+separate hosted runners, not on the shared 4GB development sandbox. Feature branch
+pushes are intentionally not a second trigger: the draft PR starts CI and later
+pushes share its concurrency group. Standard public-repository runners are in scope;
 no larger-runner labels or paid services are configured. Normal GitHub artifact
 storage/retention policies still apply.
 

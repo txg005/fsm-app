@@ -3,7 +3,7 @@ name: Verification
 on:
   pull_request:
   push:
-    branches: [main, feature/ci-verification]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
