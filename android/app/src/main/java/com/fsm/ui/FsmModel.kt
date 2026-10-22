@@ -33,6 +33,7 @@ class FsmModel(application:Application,private val saved:SavedStateHandle):Andro
     var edits by mutableStateOf<ResultWriteDto?>(null); private set
     var shadow by mutableStateOf<String?>(null); private set
     private val editLock=Mutex()
+    private var pendingSaves=0
     private var collectors:Job?=null
     init { observe(); repo?.let { app.schedule(it.employeeId) } }
     private fun observe() {
@@ -73,12 +74,14 @@ class FsmModel(application:Application,private val saved:SavedStateHandle):Andro
         go("form")
     }
     fun edit(value:ResultWriteDto) {
-        edits=value; saving=true
         val current=repo ?: return; val id=selected ?: return
+        edits=value
         viewModelScope.launch {
+            pendingSaves++; saving=true
             try { editLock.withLock { current.save(id,value) } }
+            catch(e:CancellationException) { throw e }
             catch(_:Exception) { error="Не удалось сохранить ввод на устройстве" }
-            finally { saving=false }
+            finally { pendingSaves--; saving=pendingSaves>0 }
         }
     }
     fun deleteDraft()=action {
