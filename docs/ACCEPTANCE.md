@@ -6,13 +6,33 @@
 
 Документ фиксирует выполненные проверки, пользовательские сообщения о ручном прогоне и ещё не проверенные сценарии. Успешная сборка не означает исполнения instrumentation tests или полной приёмки на физическом устройстве.
 
-## Проверенные версии
+## Актуальный статус: main `0c3f0ed…`
+
+Источник актуального автоматического результата — [CI run 39741466813](https://github.com/txg005/fsm-app/actions/runs/39741466813) на commit `0c3f0ed0e4e4ba630b4f1bb66e8d530d7808c292`. Все три job завершились успешно; report-gate annotations фиксируют фактически исполненные XML cases, а не только компиляцию APK.
+
+| Среда / источник | Фактический результат | Граница вывода |
+| --- | --- | --- |
+| CI Backend PostgreSQL | 9 unit + 11 PostgreSQL integration; 0 failures/errors/skips; installDist PASS | Hosted Linux + disposable PostgreSQL; не Docker/Windows production |
+| CI Android build | 25 JVM; 0 failures/errors/skips; lint 0 errors/19 warnings; app + test APK PASS | Не гарантия обновления установленного APK и не визуальная приёмка |
+| CI Android emulator | **15 instrumentation tests реально исполнены**, 0 failures/errors/skips, API36/google_apis/x86_64, KVM | Room/media/engine, fixtures/mock HTTP; не live backend и не вся API/device-матрица |
+| Windows — сообщение пользователя | Оба wrapper `--version`, backend `test installDist`, Android `testDebugUnitTest lintDebug assembleDebug` успешны | Ручное окружение пользователя, не Windows CI |
+| Новый UI — сообщение пользователя | Эмулятор, engineer2: фото/GPS, 2 ACK, подтверждённое CLOSED | Один конкретный UI/API сценарий; не landscape/permission/lifecycle matrix |
+
+Workflow/gate сохраняет в имени «14 baseline tests», но допускает дополнительные tests: исходные14 методов сохранены, EXIF regression расширен на8 orientations и добавлен no-EXIF case; actual total15. Android25 JVM =13 контрактных +12 UI-mapping tests. Подробности среды/команд/артефактов — [CI.md](CI.md); bootstrap/Windows — [BUILD-WINDOWS.md](BUILD-WINDOWS.md). CI не запускает environment-specific Netty smoke; его прежний успешный результат приведён ниже отдельно.
+
+**Это не all-acceptance PASS.** Следующий этап landscape/recreation/lifecycle ещё проверяется отдельно; его будущие результаты этому commit/run не приписываются. Короткий сценарий защиты — [DEMO.md](DEMO.md); прохождение сценария также записывается отдельно, а не выводится из наличия инструкции.
+
+## История первого этапа (baseline до CI/UI/EXIF продолжения)
+
+Ниже сохранены первоначальные версии и результаты: выражение «только скомпилированы» описывает **тот baseline**, не актуальный статус15 tests выше.
+
+### Проверенные версии baseline
 
 - Android PR #3: `9a7118cf373936e6ba16736e776238630c02816a`. Все 29 файлов сверены автором с локальными исходниками по Git blob SHA. QA сверил exact Git commit с проверенным снимком: 28/29 совпали, единственное ожидаемое отличие — README с результатами. Критичные исправления проверены через GitHub.
 - Backend PR #2: финальный код/отчёт `6da898f6e5d52b62862178888c5c4ba26283bbf4`; multipart runtime fix — `cf0c5c8c7b806a372969c63f4c714f102636983b`.
 - Контракт API v1.0, первоначальная заморозка: `88d8f3ed1444e4fade6ac71faa36e541b157eba1`.
 
-## Автоматические проверки
+### Автоматические проверки baseline
 
 | Область | Фактически выполнено | Результат |
 |---|---|---|
@@ -27,7 +47,7 @@
 
 XML-сводки тестов сверены координатором. Полные команды и условия запуска находятся в `android/README.md`, `backend/README.md`, `backend/VERIFICATION.md` и `backend/MULTIPART-INCIDENT.md`. Сборки в sandbox выполнялись последовательно с ограничением памяти и числа Gradle workers. Прерванные/неуспешные ранние запуски не засчитаны как успешные.
 
-## Ручной прогон пользователя
+### Ручной прогон пользователя на первом этапе
 
 Пользователь запускал backend через Docker Compose на Windows и установленный debug APK в Android-эмуляторе. Следующие результаты сообщены пользователем, а не получены автоматическим инструментальным тестом:
 
@@ -50,13 +70,31 @@ QA: все перечисленные блокирующие замечания 
 
 ## Непроверенное и ограничения
 
-- Исполнение 14 Android instrumentation tests; нужен подключённый эмулятор/телефон и воспроизводимый запуск suite.
+- Baseline gap исполнения14 tests закрыт указанным CI run: реально выполнены15. Это не закрывает физический телефон, Compose UI rotation/recreation или live-backend E2E во всех отказах.
 - Физический Android-телефон: камера/Photo Picker, GPS, Keystore, разрешения, FGS и ограничения конкретного производителя.
-- Полная матрица landscape/клавиатуры/rotation, process death/force-stop/timeout/cancel и переключения аккаунтов во время передачи. Отдельное полное прохождение не зафиксировано.
+- Полная матрица landscape/клавиатуры/rotation, Activity recreation, process death/force-stop/timeout/cancel и переключения аккаунтов во время передачи. Room/engine regressions исполнялись в CI, но не заменяют эту UI/ОС матрицу. Результаты Stage3 пока не зафиксированы здесь.
 - Docker: локальный запуск на Windows подтверждён пользователем; формальные контейнерные/volume durability tests, уничтожение питания, перезапуск хоста и потеря диска не выполнялись.
 - Production TLS/reverse proxy, публичное развёртывание, нагрузка и исчерпывающий security/fuzz testing не проверены.
 - Room schema v1: upgrade migration не заявляется. После аварии до callback камеры может остаться приватный scratch-файл без автоматического срока очистки.
 - Foreground Service не гарантирует бессмертие процесса или отправку после force-stop. Очередь сохраняется, выполнение зависит от разрешённых Android условий запуска.
+
+## Непройденная ручная матрица Stage3
+
+Это список к выполнению, не протокол успешного прогона. Для каждой строки записать commit/APK origin, устройство/API, точные шаги, результат и evidence без секретов/точных координат. Подпись APK проверять отдельно; тестовые данные не сбрасывать ради результата.
+
+| Проверка | Что считать успехом | Статус |
+| --- | --- | --- |
+| Portrait/landscape всех5 основных экранов, IME/прокрутка | Кнопки/ошибки доступны, сохранённый ввод/выбранная заявка не теряются | Не зафиксировано |
+| Activity recreation с сохранённым draft и при передаче | Сохранённые поля/фото/route согласованы; ACK/CLOSED не выдуман | Не зафиксировано |
+| Реальный process stop/reopen offline, затем Service retry | UUID/frozen bytes/local media сохранены; итоговое закрытие одно | Пользовательский основной прогон есть; полная контролируемая матрица не пройдена |
+| Cancel/Home/возврат, notifications denied, FGS ограничения | Нет false ACK, отмена передачи не отменяет close; продолжение только допустимым ОС способом | Не зафиксировано полностью |
+| GPS denied/approximate/disabled/timeout + camera/picker cancel | Честный MISSING либо свежий fix, фото/результат не теряются | Один фото/GPS user report есть; полная матрица не пройдена |
+| Account switch во время pending/Service, auth expiry | Нет чужих данных/отправки, повторный вход тем же пользователем сохраняет очередь | Межаккаунтный user report есть; конкурентная матрица не пройдена |
+| Физический телефон/OEM background и permissions | Согласованный сценарий на записанной модели/API | Не выполнено |
+
+## Debug APK и повторяемая демонстрация
+
+`applicationId=com.fsm`, baseline versionCode1/versionName1.0; совпадение package/version **не означает** совпадение сертификата. Между средами debug-подпись уже различалась. CI создаёт свои debug artifacts без обещания обновить установленное приложение. До установки сравнить signing certificate/package/version; при несовпадении остановиться, не uninstall/clear data. Сохранять один стабильный локальный debug keystore в приватном профиле того же build-окружения разумно для дальнейших локальных обновлений; не коммитить/публиковать keystore, пароли и private keys, не переносить их в CI artifacts. Инструкция не требует экспорта приватного ключа.
 
 ## Продолжение работы
 
