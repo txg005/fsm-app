@@ -33,8 +33,16 @@ SUITES = {
 # Untrusted report fields are accepted whole or replaced, never partially cleaned.
 IDENTIFIER = re.compile(r'[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*', re.ASCII)
 FRAME = re.compile(
-    r'\s*at (com\.fsm\.[A-Za-z0-9_.$]+)\.([A-Za-z_$][A-Za-z0-9_$]*)'
+    r'\s*at (com\.fsm\.(?:[A-Za-z_][A-Za-z0-9_]*\.)*[A-Za-z_][A-Za-z0-9_]*(?:\$[A-Za-z0-9_]+)*)\.([A-Za-z_$][A-Za-z0-9_$]*)'
     r'\(([A-Za-z_][A-Za-z0-9_]*Test)\.(kt|java):([1-9][0-9]{0,6})\)\s*', re.ASCII)
+# Explicit class/source pairs only; do not echo report-supplied frame methods or
+# synthetic suffixes. LifecycleUiTest is declared in PR9, not included here.
+TEST_SOURCES = {
+    'com.fsm.RoomTest': 'RoomTest.kt',
+    'com.fsm.ContractTest': 'ContractTest.kt',
+    'com.fsm.ui.UiTextTest': 'UiTextTest.kt',
+    'com.fsm.ui.LifecycleUiTest': 'LifecycleUiTest.kt',
+}
 MAX_BAD_CASES = 20
 MAX_FRAMES = 3
 
@@ -49,8 +57,13 @@ def emit(level, message):
     escaped = message.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
     print(f'::{level}::{escaped}')
     if os.environ.get('GITHUB_STEP_SUMMARY'):
-        with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
-            summary.write(f'- {escaped}\n')
+        try:
+            with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
+                summary.write(f'- {escaped}\n')
+        except (OSError, UnicodeError):
+            # Fail closed, without re-entering this broken sink or exposing paths.
+            print('::error::Report gate failed: cannot write step summary')
+            raise SystemExit(1) from None
 
 
 def diagnostic(case, tag, node):
@@ -65,10 +78,13 @@ def diagnostic(case, tag, node):
         match = FRAME.fullmatch(line)
         if not match:
             continue
-        owner, method, file, extension, number = match.groups()
-        if owner.rsplit('.', 1)[-1].split('$', 1)[0] != file:
+        owner, _method, file, extension, number = match.groups()
+        owner = owner.split('$', 1)[0]
+        source = TEST_SOURCES.get(owner)
+        if source != f'{file}.{extension}':
             continue
-        frame = f'{owner}.{method}({file}.{extension}:{number})'
+        # Emit only constants from the mapping plus the bounded numeric line.
+        frame = f'{owner}({source}:{number})'
         if len(frame) <= 240 and frame not in frames:
             frames.append(frame)
         if len(frames) == MAX_FRAMES:
@@ -82,7 +98,10 @@ def check(kind):
         files = sorted(Path('.').glob(pattern))
         if not files:
             raise ValueError(f'Missing reports: {pattern}')
-        cases = [case for file in files for case in ET.parse(file).iter('testcase')]
+        try:
+            cases = [case for file in files for case in ET.parse(file).iter('testcase')]
+        except (ET.ParseError, LookupError, OSError, ValueError):
+            raise ValueError('Unreadable or malformed XML') from None
         tags = ('failure', 'error', 'skipped')
         counts = {tag: sum(case.find(tag) is not None for case in cases) for tag in tags}
         bad = [case for case in cases if any(case.find(tag) is not None for tag in tags)]
@@ -112,9 +131,9 @@ if __name__ == '__main__':
     except (IndexError, KeyError):
         emit('error', 'Report gate failed: invalid suite argument')
         sys.exit(1)
-    except (ET.ParseError, OSError):
+    except (OSError, UnicodeError):
         # Parser/OS messages can contain report-controlled text or private paths.
-        emit('error', 'Report gate failed: unreadable or malformed XML/summary')
+        emit('error', 'Report gate failed: report access error')
         sys.exit(1)
     except ValueError as error:
         emit('error', f'Report gate failed: {error}')
