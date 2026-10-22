@@ -112,6 +112,6 @@ maintainer action, report that blocker without merging to activate CI.
 - [GitHub workflow syntax and permissions](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax)
 - [Workflow run read API](https://docs.github.com/en/rest/actions/workflow-runs)
 - [setup-java v5](https://github.com/actions/setup-java/tree/b6effb05e454b25005698d916606bdc6ffcbf961)
-- [checkout v6](https://github.com/actions/checkout/tree/d23441a48e516b6c34aea4fa41551a30eaf803)
+- [checkout v6](https://github.com/actions/checkout/tree/d23441a48e516b6c34aea4fa41551a30e30af803)
 - [upload-artifact v6](https://github.com/actions/upload-artifact/tree/b7c566a772e6b6bfb58ed0dc250532a479d7789f)
 - [Android emulator runner v2.34.0, KVM and supported inputs](https://github.com/ReactiveCircus/android-emulator-runner/tree/1dcd0090116d15e7c562f8db72807de5e036a4ed)
