@@ -164,7 +164,7 @@ jobs:
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none
           working-directory: android
           script: |
-            sh gradlew --no-daemon --no-parallel --max-workers=1 connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.notClass=com.fsm.restart.ProcessRestartTest --console=plain
+            sh gradlew --no-daemon --no-parallel --max-workers=1 connectedDebugAndroidTest -Pandroid.injected.androidTest.leaveApksInstalledAfterRun=true -Pandroid.testInstrumentationRunnerArguments.notClass=com.fsm.restart.ProcessRestartTest --console=plain
             bash ../scripts/ci/android_process_restart.sh
       - name: Require all 14 baseline tests executed without skips
         if: ${{ !cancelled() }}
