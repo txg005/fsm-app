@@ -13,7 +13,7 @@ All jobs use standard `ubuntu-24.04` GitHub-hosted runners and Temurin JDK17:
 | --- | --- | --- |
 | Backend PostgreSQL | `sh gradlew --no-daemon --no-parallel --max-workers=1 -Pkotlin.compiler.execution.strategy=in-process test integrationTest installDist --console=plain` | 25 minutes |
 | Android SDK36 build and lint | `sh gradlew --no-daemon --no-parallel --max-workers=1 testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest --console=plain` | 30 minutes |
-| Android instrumentation API36 | `sh gradlew --no-daemon --no-parallel --max-workers=1 connectedDebugAndroidTest --console=plain` | 35 minutes; emulator step 25, boot 10 |
+| Android instrumentation API36 | `sh gradlew --no-daemon --no-parallel --max-workers=1 connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.notClass=com.fsm.restart.ProcessRestartTest --console=plain`, then `bash ../scripts/ci/android_process_restart.sh` | 35 minutes; emulator step 25, boot 10 |
 
 The PostgreSQL15.10 service has a health check and an isolated job-lifetime DB.
 Its published password is intentionally a disposable CI fixture, not a secret
@@ -43,7 +43,9 @@ instrumentation tests. Instrumentation also requires each of the fourteen
 baseline `com.fsm.RoomTest` methods by name, so replacing the suite with unrelated
 tests or APK compilation cannot pass the gate. Additional passing tests are
 allowed. Suite failures and emulator boot failures stay red; no continue-on-error,
-retry-until-green, test exclusion, or ignored suite. Gradle's own lint gate stays
+retry-until-green, exclusion of ordinary cases, or ignored suite. The new
+restart phase class is explicitly excluded from this ordinary invocation and
+required separately below; its methods are not skipped/ignored testcases. Gradle's own lint gate stays
 unchanged (existing warnings are not claimed fixed).
 
 Reports and Android APKs are uploaded even after failures, when generated, with
@@ -87,6 +89,71 @@ No user `.env`, local credentials, tokens, production DBs or private device data
 are read, cached or uploaded. Never broaden artifacts to the whole checkout,
 Gradle home or environment dumps.
 
+## Separate process force-stop protocol
+
+The emulator action keeps the emulator alive for both commands; failure of either
+command fails the step. Before any restart actions, the existing XML gate and
+`check_process_restart.py` require all 21 ordinary cases (15 Room, 6 lifecycle),
+exact class/method names once each, with zero failure/error/skips. Empty, duplicate,
+missing, or phase-contaminated XML fails. Ordinary reports remain separate from
+the two selected restart methods; they do not claim 23 ordinary XML cases.
+
+`android_process_restart.sh` invokes the gates and a Python standard-library-only
+host protocol, on one `emulator-*` device, GitHub-hosted runner, Android user0,
+fixed target `com.fsm` and runner
+`com.fsm.test/androidx.test.runner.AndroidJUnitRunner`. Every device command is
+serial-scoped. Before the first warm launch a read-only `run-as` preflight rejects
+any account preference entries (including backup), `fsm_*` database files,
+account-directory children (including hidden entries), `tokens_*` preference files,
+or previous restart markers. Empty account preference maps and unrelated
+WorkManager databases are permitted. Symlinked storage roots are rejected.
+Nothing is deleted, reset, installed or opened as an account by the host.
+
+Airplane mode is enabled and Wi-Fi/mobile data disabled before **each** warm
+launch. The host requires airplane=1, wifi=0, mobile_data=0 and
+`dumpsys connectivity` reporting `Active default network: none`. No later command
+enables networking; this state is also checked after verification without
+reapplying settings. This is a bounded disposable-emulator protocol, not evidence
+of offline operation on arbitrary devices or a continuous packet capture.
+
+The host warms `com.fsm/.MainActivity`, records its sole PID privately, then uses
+`am instrument -w -r --no-restart` with exact
+`com.fsm.restart.ProcessRestartTest#seedDurableState`. Both phases receive a new
+lowercase UUIDv4 `restartRunId` and `restartSeedPid`; verification additionally
+receives `restartVerifyPid`. The host requires exactly one started and one passed
+case of the selected class/method, no other statuses, and final instrumentation
+code -1. A successful adb exit or marker alone cannot pass. After seed finishes,
+the same PID must still exist. Only then does the host issue
+`am force-stop --user 0 com.fsm`, require process absence, warm a different PID,
+and attach `#verifyDurableStateAfterForceStop` with `--no-restart` again. That PID
+must also remain alive after instrumentation finishes. Commands have deadlines
+(20s normally, 40s warm launch, 180s per instrumentation phase) and finite polls;
+the existing 25-minute action/35-minute job deadlines remain outer bounds.
+
+There is no reinstall, clear-data, activity-only fallback, software-emulator
+fallback, blanket kill, or retry-until-green. This proves explicit force-stop and
+fresh Application startup against durable Room/photo/outbox state, not Android
+low-memory-killer behavior or automatic worker recovery. The test first checks the
+unchanged RUNNING checkpoint, then explicitly exercises repository recovery;
+unexpected worker interference fails rather than being labelled data loss.
+
+Only strict own-run JSON is copied to `android-process-restart-api36` (7 days):
+`manifest.json`, `seed-result.json`, `verify-result.json`, `host-proof.json`.
+The manifest accepts only the agreed exact schema, UUIDv4 identities, lowercase
+hashes, two photo rows and two ACKED-upload/RUNNING-close operation rows. It has
+no request bodies, credentials, GPS/comments, or raw DTOs. Duplicate/extra keys,
+foreign account/run IDs, malformed hashes/ownership/state, non-JSON numbers and
+oversized markers fail. Result markers require exact fixed true booleans. Host
+proof contains only schemaVersion and fixed booleans, never PIDs or arguments.
+Only fixed stage errors are printed; raw device output, exception messages and
+unvalidated markers are neither annotated nor saved as artifacts. Partial host
+proof remains failed, not a substitute for both passing phases. The test's
+owned-UUID cleanup is performed only after its verification assertions; host
+failure never authorizes deletion of unknown data.
+
+This configuration is not execution evidence. Initial local checks use synthetic
+fixtures only; combined Android compilation and a real hosted run remain required.
+
 ## Security and resource limits
 
 Only `contents: read`; checkout does not persist credentials. PRs use
@@ -96,7 +163,7 @@ GitHub approval; their cache writes are scoped by GitHub's PR cache isolation.
 Treat all PR reports/APKs as untrusted artifacts. Actions are immutable commit
 pins; do not replace them with moving tags without review.
 
-Setup-java caches Gradle dependencies keyed keyed by the relevant build files; test
+Setup-java caches Gradle dependencies keyed by the relevant build files; test
 outputs/APKs/AVDs are not reused as test evidence. No AVD snapshots are cached.
 Gradle has one worker/no parallel tasks, respecting existing heap limits.
 Concurrency cancels superseded runs for the same PR/ref. The three jobs run on
@@ -128,3 +195,9 @@ maintainer action, report that blocker without merging to activate CI.
 - [checkout v6](https://github.com/actions/checkout/tree/d23441a48e516b6c34aea4fa41551a30e30af803)
 - [upload-artifact v6](https://github.com/actions/upload-artifact/tree/b7c566a772e6b6bfb58ed0dc250532a479d7789f)
 - [Android emulator runner v2.34.0, KVM and supported inputs](https://github.com/ReactiveCircus/android-emulator-runner/tree/1dcd0090116d15e7c562f8db72807de5e036a4ed)
+
+- [AndroidJUnitRunner class/method and notClass selection](https://developer.android.com/reference/androidx/test/runner/AndroidJUnitRunner)
+- [Android16 am --no-restart implementation](https://android.googlesource.com/platform/frameworks/base/+/android-16.0.0_r1/cmds/am/src/com/android/commands/am/Am.java)
+- [Android16 attach to existing process and finish without force-stop](https://android.googlesource.com/platform/frameworks/base/+/android-16.0.0_r1/services/core/java/com/android/server/am/ActivityManagerService.java)
+- [Android16 default-network diagnostic](https://android.googlesource.com/platform/packages/modules/Connectivity/+/android-16.0.0_r1/service/src/com/android/server/ConnectivityService.java)
+- [Android16 svc Wi-Fi/data command delegation](https://android.googlesource.com/platform/frameworks/base/+/android-16.0.0_r1/cmds/svc/svc.sh)
