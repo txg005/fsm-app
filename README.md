@@ -30,11 +30,13 @@ docker compose up --build -d
 
 ## Статус проверки
 
-Проверенная исходная точка: main `0c3f0ed0e4e4ba630b4f1bb66e8d530d7808c292`. [CI run 39741466813](https://github.com/txg005/fsm-app/actions/runs/39741466813) завершил все три job: backend **9 unit + 11 PostgreSQL**, Android **25 JVM + 15 реально исполненных instrumentation tests на API36/KVM**, без failures/errors/skips; lint без ошибок (19 предупреждений), оба APK собраны. Название instrumentation job сохраняет «14-test»: это baseline floor, фактический результат — 15.
+Актуальная проверенная исходная точка: main `c651a29c659f79baa3f39e5d8ef61d56300d0856` после объединения PR9–12. [Итоговый CI run 39797634913](https://github.com/txg005/fsm-app/actions/runs/39797634913): backend **9 unit + 15 PostgreSQL integration**, Android **25 JVM + 21 реально исполненный instrumentation test на API36/KVM**, все без failures/errors/skips; lint — **0 errors**, оба APK и backend installDist — PASS. Число предупреждений последнего lint здесь не пересчитывалось; 19 warnings относится к прежнему baseline.
+
+Stage3 проверил landscape/IME и Activity recreation пяти основных экранов в одном hosted-эмуляторе. Регрессия выявила преждевременный сброс `saving` при очереди локальных записей; после минимального pending-count fix повторный прогон GREEN. Четыре новые HTTP/PostgreSQL-регрессии покрывают upload/replay, дедупликацию фото и доступ к историческим receipts/фото. Подробности и сохранённая история baseline — в [ACCEPTANCE.md](docs/ACCEPTANCE.md).
 
 Отдельно пользователь сообщил об успешных Windows wrapper `--version` для обоих проектов, backend `test installDist`, Android unit/lint/debug APK и эмуляторном сценарии нового UI: engineer2, фото/GPS, два ACK и подтверждённое CLOSED. Это пользовательские сообщения, **не автоматическая Windows/device-матрица**. История первого этапа сохранена в [ACCEPTANCE.md](docs/ACCEPTANCE.md).
 
-Полной приёмки пока нет: landscape/recreation/lifecycle Stage3, физический телефон и полная матрица ограничений Android остаются отдельными проверками. Instrumentation использует Room/fixtures/mock HTTP, не настоящий backend. CI APK не обещает обновление уже установленного APK: debug-подписи разных сред могут различаться; не удаляйте приложение/данные для обхода несовпадения. Условия повторной демонстрации и сохранности данных — в [DEMO.md](docs/DEMO.md).
+Полной приёмки пока нет: физический телефон, process death/force-stop, полный lifecycle/permission/Service E2E и Netty packet-drop остаются отдельными проверками. Activity recreation не равна process death; переход Room ACK → UI не доказывает реальную передачу Service. Instrumentation использует Room/fixtures/mock HTTP, не настоящий backend. CI APK не обещает обновление уже установленного APK: debug-подписи разных сред могут различаться; не удаляйте приложение/данные для обхода несовпадения. Условия повторной демонстрации и сохранности данных — в [DEMO.md](docs/DEMO.md).
 
 ## Документы проекта
 
