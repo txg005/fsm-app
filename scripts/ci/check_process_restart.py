@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import tempfile
 import time
@@ -192,20 +193,39 @@ def command(args, seconds=20, cap=1024*1024):
         return out.read()
 
 
+DEVICE_STAGES = ('hostenv', 'singledevice', 'qemuprop', 'boot', 'user', 'component')
+
+
+class DeviceGuardError(ValueError):
+    def __init__(self, stage):
+        require(stage in DEVICE_STAGES)
+        self.stage = stage
+
+
 class Device:
     def __init__(self):
-        require(os.environ.get('GITHUB_ACTIONS') == 'true')
-        require(os.environ.get('RUNNER_ENVIRONMENT') == 'github-hosted')
-        rows = command(['adb', 'devices']).decode('ascii').strip().splitlines()
-        require(len(rows) == 2 and rows[0] == 'List of devices attached')
-        serial, state = rows[1].split()
-        require(re.fullmatch(r'emulator-[0-9]{4,5}', serial) and state == 'device')
-        self.serial = serial
-        require(self.shell('getprop ro.kernel.qemu').strip() == b'1')
-        require(self.shell('getprop sys.boot_completed').strip() == b'1')
-        require(self.shell('am get-current-user').strip() == b'0')
-        instruments = self.shell('pm list instrumentation').decode('ascii').splitlines()
-        require('instrumentation:' + COMPONENT + ' (target=com.fsm)' in instruments)
+        stage = 'hostenv'
+        try:
+            require(os.environ.get('GITHUB_ACTIONS') == 'true')
+            require(os.environ.get('RUNNER_ENVIRONMENT') == 'github-hosted')
+            stage = 'singledevice'
+            rows = command(['adb', 'devices']).decode('ascii').strip().splitlines()
+            require(len(rows) == 2 and rows[0] == 'List of devices attached')
+            serial, state = rows[1].split()
+            require(re.fullmatch(r'emulator-[0-9]{4,5}', serial) and state == 'device')
+            self.serial = serial
+            stage = 'qemuprop'
+            require(self.shell('getprop ro.kernel.qemu').strip() == b'1')
+            stage = 'boot'
+            require(self.shell('getprop sys.boot_completed').strip() == b'1')
+            stage = 'user'
+            require(self.shell('am get-current-user').strip() == b'0')
+            stage = 'component'
+            instruments = self.shell('pm list instrumentation').decode('ascii').splitlines()
+            require('instrumentation:' + COMPONENT + ' (target=com.fsm)' in instruments)
+        except (ValueError, UnicodeError, OSError, subprocess.SubprocessError):
+            # No raw command/exception text; labels are constants above.
+            raise DeviceGuardError(stage) from None
 
     def shell(self, script, seconds=20):
         return command(['adb', '-s', self.serial, 'shell', script], seconds)
@@ -232,7 +252,7 @@ for f in shared_prefs/account.xml shared_prefs/account.xml.bak; do
 if [ -L "$f" ]; then exit 1; fi
 if [ -e "$f" ]; then printf 'PREF\\n'; cat "$f" || exit 1; printf '\\nENDPREF\\n'; fi
 done'''
-        raw = self.shell("run-as com.fsm sh -c '" + script + "'")
+        raw = self.shell("run-as com.fsm sh -c " + shlex.quote(script))
         text = raw.decode('utf-8')
         # Only complete empty Android preference maps; never echo content.
         while text:
@@ -342,6 +362,9 @@ def main():
         device.offline(configure=False)
         proof['offlineAfterVerify'] = True
         proof['passed'] = True
+    except DeviceGuardError as error:
+        print('::error::Process restart protocol failed at hosted-emulator-' + error.stage)
+        return 1
     except (ValueError, TypeError, KeyError, UnicodeError, OSError, LookupError,
             ET.ParseError, RecursionError, subprocess.SubprocessError):
         # Stage is a code constant, never exception/device/XML/JSON text.
