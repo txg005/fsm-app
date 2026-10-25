@@ -394,6 +394,31 @@ def prepare():
             540, 4*1024*1024, cwd='android')
 
 
+def reverse_rows(raw):
+    # adb_query_command prints "%s\\n" even for an empty listener list.
+    # Ignore empty framing rows only; every nonempty row remains strict/fail-closed.
+    require(len(raw) <= 16384)
+    text = raw.decode('ascii').replace('\r\n', '\n')
+    require(all(char in '\n\t' or 32 <= ord(char) <= 126 for char in text))
+    rows = []
+    for line in text.split('\n'):
+        if not line.strip():
+            continue
+        fields = line.split()
+        require(len(fields) == 3 and all(0 < len(field) <= 256 for field in fields))
+        require(re.fullmatch(r'[A-Za-z0-9_.():-]+', fields[0]) is not None)
+        for endpoint in fields[1:]:
+            if endpoint.startswith('tcp:'):
+                port = endpoint[4:]
+                require(re.fullmatch(r'[1-9][0-9]{0,4}', port) is not None and int(port) <= 65535)
+            else:
+                require(re.fullmatch(r'local(?:abstract|reserved|filesystem):[!-~]+', endpoint) is not None)
+        rows.append(tuple(fields))
+    # One selected device cannot have two listeners bound to the same endpoint.
+    require(len({row[1] for row in rows}) == len(rows))
+    return rows
+
+
 def process_start(pid):
     raw = Path('/proc', str(pid), 'stat').read_text()
     return raw[raw.rfind(')') + 2:].split()[19]
@@ -466,14 +491,12 @@ def run():
         require(abs(time.time() - instant(ready['hostReadyAt'])) <= 5)
         fixture = validate('fixture', wait_file(control / 'fixture.json', 5, host), nonce)
         stage('reverse')
-        mappings = command(['adb', '-s', serial, 'reverse', '--list']).decode('ascii').splitlines()
-        for line in mappings:
-            fields = line.split()
-            require(len(fields) == 3 and fields[1] != 'tcp:18080')
+        mappings = reverse_rows(command(['adb', '-s', serial, 'reverse', '--list']))
+        require(all(row[1] != 'tcp:18080' for row in mappings))
         command(['adb', '-s', serial, 'reverse', 'tcp:18080', 'tcp:' + str(ready['hostPort'])])
         reverse = True
-        actual = command(['adb', '-s', serial, 'reverse', '--list']).decode('ascii').splitlines()
-        require(sum(line.split()[1:] == ['tcp:18080', 'tcp:' + str(ready['hostPort'])] for line in actual) == 1)
+        actual = reverse_rows(command(['adb', '-s', serial, 'reverse', '--list']))
+        require(sum(row[1:] == ('tcp:18080', 'tcp:' + str(ready['hostPort'])) for row in actual) == 1)
         stage('clock')
         before, mono = time.time(), time.monotonic()
         epoch = device.shell('date +%s').strip()
