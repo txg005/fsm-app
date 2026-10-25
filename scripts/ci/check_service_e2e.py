@@ -30,7 +30,8 @@ OUT = Path('android/app/build/outputs/service-e2e')
 PG = Path('/usr/lib/postgresql/16/bin')
 STAGES = ('prepare', 'hostenv', 'compile', 'postgres', 'device', 'preflight', 'install',
           'host-ready', 'reverse', 'clock', 'fixture', 'runner', 'initial', 'close',
-          'result', 'host-proof', 'cleanup')
+          'result', 'host-proof', 'cleanup', 'fixture-run-as', 'fixture-parent',
+          'fixture-directory', 'fixture-stdin', 'fixture-publish', 'fixture-verify')
 STAGE = 'prepare'
 RESULT_FLAGS = ('workerQuiescent workerReservationVerified serviceObservedForeground '
                 'serviceNotificationObserved serviceSameInstanceAtClose workerQuiescentAtClose '
@@ -302,7 +303,7 @@ class ServiceDevice(Device):
         require(b'ServiceRecord{' not in raw)
 
     def app_read(self, name):
-        require(name in ('service-ready', 'close-observed', 'result'))
+        require(name in ('fixture', 'service-ready', 'close-observed', 'result'))
         # Absent sentinel is not a parse failure; stderr/raw output never escapes.
         path = APPROOT + name + '.json'
         script = ('[ -d ' + APPROOT + ' ] && [ ! -L ' + APPROOT + ' ] && '
@@ -314,9 +315,33 @@ class ServiceDevice(Device):
 
     def app_write(self, name, obj):
         require(name in ('fixture', 'release-service', 'close-committed'))
-        prefix = ('mkdir ' + APPROOT + ' && ') if name == 'fixture' else ''
+        if name == 'fixture':
+            stage('fixture-run-as')
+            self.shell('run-as com.fsm sh -c ' + shlex.quote(':'))
+            stage('fixture-parent')
+            # Fresh install need not have Context.getFilesDir() materialized yet.
+            # Create only the missing fixed parent; never adopt a file or symlink.
+            parent = ('umask 077; if [ ! -e files ] && [ ! -L files ]; then mkdir files || exit 1; fi; '
+                      '[ -d files ] && [ ! -L files ]')
+            self.shell('run-as com.fsm sh -c ' + shlex.quote(parent))
+            stage('fixture-directory')
+            self.shell('run-as com.fsm sh -c ' + shlex.quote(
+                'umask 077; [ -d files ] && [ ! -L files ] && mkdir ' + APPROOT))
+            stage('fixture-stdin')
+            incoming = APPROOT + '.fixture.incoming'
+            self.shell('run-as com.fsm sh -c ' + shlex.quote(
+                'umask 077; set -C; [ -d ' + APPROOT + ' ] && [ ! -L ' + APPROOT + ' ] && cat > ' + incoming),
+                input_data=encode(obj))
+            stage('fixture-publish')
+            self.shell('run-as com.fsm sh -c ' + shlex.quote(
+                '[ -d ' + APPROOT + ' ] && [ ! -L ' + APPROOT + ' ] && '
+                '[ -f ' + incoming + ' ] && [ ! -L ' + incoming + ' ] && '
+                'ln ' + incoming + ' ' + APPROOT + 'fixture.json && rm ' + incoming))
+            stage('fixture-verify')
+            require(validate('fixture', self.app_read('fixture'), obj['runNonce']) == obj)
+            return
         # Two shells: quote the whole remote sh -c program, stdin carries JSON only.
-        script = ('umask 077; set -C; ' + prefix + '[ -d ' + APPROOT + ' ] && [ ! -L ' + APPROOT + ' ] && '
+        script = ('umask 077; set -C; [ -d ' + APPROOT + ' ] && [ ! -L ' + APPROOT + ' ] && '
                   'cat > ' + APPROOT + '.' + name + '.incoming && '
                   'ln ' + APPROOT + '.' + name + '.incoming ' + APPROOT + name + '.json && '
                   'rm ' + APPROOT + '.' + name + '.incoming')

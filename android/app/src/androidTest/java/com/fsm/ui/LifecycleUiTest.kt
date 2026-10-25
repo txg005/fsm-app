@@ -3,10 +3,14 @@ package com.fsm.ui
 import android.content.Context
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
+import android.os.SystemClock
 import android.view.WindowInsets
+import android.view.inputmethod.InputMethodManager
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.room.withTransaction
@@ -113,9 +117,41 @@ class LifecycleUiTest {
         scenario!!.recreate()
         scenario!!.onActivity {model=ViewModelProvider(it)[FsmModel::class.java]}
     }
-    private fun showIme() {
+    private fun showIme(editorLabel:String) {
+        // One shared 10-second budget: rotation may finish configuration before window/editor setup.
+        val deadline=SystemClock.elapsedRealtime()+10000
+        fun remaining():Long {
+            val millis=deadline-SystemClock.elapsedRealtime()
+            assertTrue("IME readiness/visibility exceeded 10 seconds",millis>0)
+            return millis
+        }
+        fun windowReady(activity:MainActivity):Boolean {
+            val decor=activity.window.decorView
+            return activity.lifecycle.currentState==Lifecycle.State.RESUMED &&
+                decor.isAttachedToWindow && decor.hasWindowFocus() && decor.rootWindowInsets!=null
+        }
+        compose.waitUntil(remaining()) {
+            var ready=false
+            scenario!!.onActivity {ready=windowReady(it)}
+            ready
+        }
+        val editor=compose.onNode(hasSetTextAction() and hasText(editorLabel))
+        editor.performSemanticsAction(SemanticsActions.RequestFocus) {it()}
+        editor.assertIsFocused()
+        compose.waitUntil(remaining()) {
+            var ready=false
+            scenario!!.onActivity { activity ->
+                val focused=activity.currentFocus
+                val imm=activity.getSystemService(InputMethodManager::class.java)
+                ready=windowReady(activity) && focused!=null && focused.isAttachedToWindow &&
+                    focused.hasFocus() && focused.windowToken==activity.window.decorView.windowToken &&
+                    imm.isActive(focused) && imm.isAcceptingText
+            }
+            ready
+        }
+        editor.assertIsFocused()
         scenario!!.onActivity {it.window.insetsController?.show(WindowInsets.Type.ime())}
-        compose.waitUntil(10000) {
+        compose.waitUntil(remaining()) {
             var visible=false
             scenario!!.onActivity {visible=it.window.decorView.rootWindowInsets?.isVisible(WindowInsets.Type.ime())==true}
             visible
@@ -135,12 +171,12 @@ class LifecycleUiTest {
     @Test fun loginLandscapeRetainsLoginAndKeepsPasswordEphemeralWithIme() {
         launch()
         compose.onNodeWithText("Логин").performClick().performTextInput("synthetic.engineer")
-        showIme()
+        showIme("Логин")
         compose.onNodeWithText("Пароль").performScrollTo().assertIsDisplayed()
         landscape()
         compose.onNodeWithText("Логин").performScrollTo().assertTextContains("synthetic.engineer")
         compose.onNodeWithText("Пароль").performClick().performTextInput("synthetic-only-not-a-credential")
-        showIme()
+        showIme("Пароль")
         compose.onNodeWithText("Войти").performScrollTo().assertIsDisplayed().assertIsEnabled()
         recreate()
         compose.onNodeWithText("Логин").performScrollTo().assertTextContains("synthetic.engineer")
@@ -167,7 +203,7 @@ class LifecycleUiTest {
             compose.onAllNodes(isToggleable())[0].performScrollTo().performClick()
             compose.onNode(hasSetTextAction() and hasText(order.measurementSpecs.first().label,substring=true)).performScrollTo().performTextReplacement("2.40")
             compose.onNodeWithText("Комментарий").performScrollTo().performClick().performTextInput("synthetic unsaved edit")
-            showIme()
+            showIme("Комментарий")
             assertTrue("Pending local writes are not confirmed saves",model.saving)
             assertEquals(before,savedDraft())
             landscape()
@@ -175,7 +211,7 @@ class LifecycleUiTest {
             compose.onNode(hasSetTextAction() and hasText(order.measurementSpecs.first().label,substring=true)).performScrollTo().assertTextContains("2.40")
             assertTrue(requireNotNull(model.edits).answers.any {it.checked})
             compose.onNodeWithText("Комментарий").performScrollTo().performClick()
-            showIme()
+            showIme("Комментарий")
             compose.onNodeWithText("К фото и закрытию").performScrollTo().assertIsDisplayed().assertIsNotEnabled()
             compose.onNodeWithText("Назад").performScrollTo().performClick()
             compose.onNodeWithText("Изменить черновик").performScrollTo().performClick()
