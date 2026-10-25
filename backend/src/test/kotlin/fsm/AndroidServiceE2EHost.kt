@@ -53,15 +53,25 @@ object AndroidServiceE2EHost {
             success = true
         } catch (_: Throwable) {
             // No causes, DTOs, credentials, SQL or filesystem paths in the failure surface.
+            host?.recordFailure()
         } finally {
-            try { host?.close() } catch (_: Throwable) { success = false }
+            try { host?.close() } catch (_: Throwable) { host?.recordFailure(); success = false }
         }
         if (success) {
-            try { host!!.publishSuccess() } catch (_: Throwable) { success = false }
+            try { host!!.publishSuccess() } catch (_: Throwable) { host?.recordFailure(); success = false }
         }
-        console.println(if (success) "E2E_HOST_PASS" else "E2E_HOST_FAILED")
+        console.println(if (success) "E2E_HOST_PASS" else
+            "E2E_HOST_FAILED:" + (host?.failureCategory() ?: E2eHostPhase.STARTUP).name)
         exitProcess(if (success) 0 else 1)
     }
+}
+
+// Failure-only diagnostic vocabulary. No runtime values or Throwable text can enter it.
+private enum class E2eHostPhase {
+    STARTUP, CLOSE_SQL, CLOSE_RELEASE, RESULT_CONTROL, RESULT_SQL, PHOTO_SQL,
+    RECEIPTS_SQL, RECEIPT_HASH, BLOB, OWN_AUTH, OWN_JPEG, OWN_HEADERS,
+    FOREIGN_AUTH, FOREIGN_404, CLEANUP_NETTY, CLEANUP_DATABASE, CLEANUP_SCHEMA,
+    CLEANUP_STORAGE, CLEANUP_CONTROL, PUBLISH_RESULT, PUBLISH_PROOF
 }
 
 private val readyKeys = setOf("schemaVersion", "fixtureExpectationVersion", "runNonce", "hostPort", "hostReadyAt", "hostDeadlineAt")
@@ -96,6 +106,11 @@ private fun JsonObject.digest(key: String) = text(key).also { check(Regex("[0-9a
 private fun JsonObject.instant(key: String) = text(key).also { check(validInstant(it)) }.let(Instant::parse)
 
 private class ServiceE2eFixture : AutoCloseable {
+    private val phase = AtomicReference(E2eHostPhase.STARTUP)
+    private val firstFailure = AtomicReference<E2eHostPhase?>(null)
+    fun recordFailure() { firstFailure.compareAndSet(null, phase.get()) }
+    fun failureCategory(): E2eHostPhase = firstFailure.get() ?: phase.get()
+    private fun mark(value: E2eHostPhase) { phase.set(value) }
     private val closed = AtomicBoolean(false)
     private val failure = AtomicBoolean(false)
     private val barrierEntered = AtomicBoolean(false)
@@ -211,6 +226,7 @@ private class ServiceE2eFixture : AutoCloseable {
                 if (call.request.httpMethod == HttpMethod.Post && call.request.path() == closePath &&
                     (subject as? OutgoingContent)?.status == HttpStatusCode.OK) {
                     try { closeResponseBarrier() } catch (_: Throwable) {
+                        recordFailure()
                         failure.set(true)
                         error("E2E close barrier failed")
                     }
@@ -242,6 +258,7 @@ private class ServiceE2eFixture : AutoCloseable {
         }
         abortCheck()
         check(System.nanoTime() < deadline)
+        mark(E2eHostPhase.RESULT_CONTROL)
         val outcome = read("outcome.json", setOf("schemaVersion", "runNonce", "androidExitCode"))
         check(outcome.number("androidExitCode") == 0L && barrierEntered.get() && barrierReleased.get())
         val result = read("android-result.json", resultKeys)
@@ -251,8 +268,10 @@ private class ServiceE2eFixture : AutoCloseable {
 
     // No PASS artifact is published until owned resource cleanup has succeeded.
     fun publishSuccess() {
+        mark(E2eHostPhase.PUBLISH_RESULT)
         check(closed.get() && !failure.get())
         publish("result.json", verifiedResult ?: error("Missing verified result"))
+        mark(E2eHostPhase.PUBLISH_PROOF)
         publish("hostproof.json", buildJsonObject {
             put("schemaVersion", 1); put("runNonce", runNonce); put("status", "PASS")
             put("sqlVerified", true); put("receiptsVerified", true); put("privateJpegVerified", true); put("foreignPhoto404", true)
@@ -260,6 +279,7 @@ private class ServiceE2eFixture : AutoCloseable {
     }
 
     private suspend fun closeResponseBarrier() {
+        mark(E2eHostPhase.CLOSE_SQL)
         check(barrierEntered.compareAndSet(false, true)) // A second successful close cannot bypass attribution.
         val closeOperation = transaction { c ->
             check(c.count("inspection_results") == 1 && c.count("photos") == 1 && c.count("idempotency_receipts") == 2)
@@ -269,6 +289,7 @@ private class ServiceE2eFixture : AutoCloseable {
             c.query("SELECT operation_id FROM idempotency_receipts WHERE employee_id=? AND method='POST' AND path=? AND status=200",
                 id(employee), closePath) { it.getString(1) }.single().also(::uuid)
         }
+        mark(E2eHostPhase.CLOSE_RELEASE)
         operationAtGate.set(closeOperation)
         val gateNonce = newId()
         val committedAt = Instant.now()
@@ -294,6 +315,7 @@ private class ServiceE2eFixture : AutoCloseable {
     }
 
     private fun verify(result: JsonObject) {
+        mark(E2eHostPhase.RESULT_CONTROL)
         check(result.number("fixtureExpectationVersion") == 1L)
         resultFlags.forEach(result::yes)
         check(result.text("finalLifecycle") == "CLOSED" && result.text("jpegSha256") == jpegSha)
@@ -310,6 +332,7 @@ private class ServiceE2eFixture : AutoCloseable {
         result.digest("closeFrozenPayloadSha256") // Persisted frozen bytes: distinct from transformed wire bytes.
         val wireHash = result.digest("closeWireBodySha256")
         var photo: Photo? = null
+        mark(E2eHostPhase.RESULT_SQL)
         transaction { c ->
             check(c.count("inspection_results") == 1 && c.count("photos") == 1 && c.count("idempotency_receipts") == 2)
             val canonical = c.order(employee, order)
@@ -321,13 +344,16 @@ private class ServiceE2eFixture : AutoCloseable {
             check(final.capturedAt == result.text("resultCapturedAt") && final.photos.size == 1)
             photo = final.photos.single()
             check(photo!!.id == localPhoto && photo!!.serverPhotoId == serverPhoto && photo!!.sha256 == jpegSha && photo!!.byteSize == expectedJpeg.size.toLong())
+            mark(E2eHostPhase.PHOTO_SQL)
             c.query("SELECT * FROM photos") { row ->
                 check(row.getString("owner_id") == employee && row.getString("work_order_id") == order && row.getString("result_id") == resultId)
                 check(row.getString("state") == "ATTACHED" && row.getInt("position") == 0)
                 check(row.getString("storage_key") == storage!!.key(PhotoMetadata(localPhoto, "image/jpeg", expectedJpeg.size.toLong(), jpegSha)))
             }.single()
             val metadata = PhotoMetadata(localPhoto, "image/jpeg", expectedJpeg.size.toLong(), jpegSha)
+            mark(E2eHostPhase.RECEIPTS_SQL)
             c.query("SELECT * FROM idempotency_receipts WHERE employee_id=?", id(employee)) { row ->
+                mark(E2eHostPhase.RECEIPTS_SQL)
                 val op = row.getString("operation_id")
                 check(row.getString("method") == "POST")
                 when (op) {
@@ -337,6 +363,7 @@ private class ServiceE2eFixture : AutoCloseable {
                     }
                     closeOperation -> {
                         check(row.getString("path") == closePath && row.getInt("status") == 200)
+                        mark(E2eHostPhase.RECEIPT_HASH)
                         check(row.getString("semantic_hash") == sha("POST\n$closePath\n$wireHash".toByteArray(Charsets.UTF_8)))
                         check(decode<CloseReceipt>(row.getString("body").toByteArray()) == CloseReceipt(op, canonical))
                     }
@@ -345,19 +372,25 @@ private class ServiceE2eFixture : AutoCloseable {
                 op
             }.also { check(it.toSet() == setOf(uploadOperation, closeOperation) && it.size == 2) }
         }
+        mark(E2eHostPhase.BLOB)
         val metadata = PhotoMetadata(localPhoto, "image/jpeg", expectedJpeg.size.toLong(), jpegSha)
         check(Files.list(storage!!.root).use { files -> files.map { it.fileName.toString() }.toList() } == listOf(storage!!.key(metadata)))
         check(Files.readAllBytes(storage!!.path(storage!!.key(metadata))).contentEquals(expectedJpeg))
         val client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build()
         fun getPhoto(token: String): HttpResponse<ByteArray> = client.send(HttpRequest.newBuilder(URI("http://127.0.0.1:$port${photo!!.contentPath}"))
             .timeout(Duration.ofSeconds(5)).header("Authorization", "Bearer $token").GET().build(), HttpResponse.BodyHandlers.ofByteArray())
+        mark(E2eHostPhase.OWN_AUTH)
         val ownToken = auth.login(LoginRequest(firstLogin, syntheticPassword), "host-own").accessToken
+        mark(E2eHostPhase.OWN_JPEG)
         val own = getPhoto(ownToken)
         check(own.statusCode() == 200 && own.body().contentEquals(expectedJpeg))
+        mark(E2eHostPhase.OWN_HEADERS)
         check(own.headers().firstValue("Content-Length").orElseThrow() == expectedJpeg.size.toString())
         check(own.headers().firstValue("Content-Type").orElseThrow() == "image/jpeg")
         check(own.headers().firstValue("ETag").orElseThrow() == "\"$jpegSha\"")
+        mark(E2eHostPhase.FOREIGN_AUTH)
         val otherToken = auth.login(LoginRequest(secondLogin, syntheticPassword), "host-other").accessToken
+        mark(E2eHostPhase.FOREIGN_404)
         val foreign = getPhoto(otherToken)
         check(foreign.statusCode() == 404 && decodeErrorCode(foreign.body()) == "NOT_FOUND")
     }
@@ -370,16 +403,19 @@ private class ServiceE2eFixture : AutoCloseable {
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
         var cleanupFailed = false
-        fun clean(block: () -> Unit) { try { block() } catch (_: Throwable) { cleanupFailed = true } }
-        clean { stopServer?.invoke() }
-        clean { db?.close() }
-        if (schemaCreated) clean {
+        fun clean(category: E2eHostPhase, block: () -> Unit) {
+            mark(category)
+            try { block() } catch (_: Throwable) { recordFailure(); cleanupFailed = true }
+        }
+        clean(E2eHostPhase.CLEANUP_NETTY) { stopServer?.invoke() }
+        clean(E2eHostPhase.CLEANUP_DATABASE) { db?.close() }
+        if (schemaCreated) clean(E2eHostPhase.CLEANUP_SCHEMA) {
             check(Regex("service_e2e_[0-9a-f]{32}").matches(schema))
             DriverManager.getConnection(jdbc, dbUser, dbPassword).use { it.exec("DROP SCHEMA $schema CASCADE") }
         }
-        storage?.root?.let { directory -> clean { Files.walk(directory).use { files -> files.sorted(Comparator.reverseOrder()).forEach(Files::delete) } } }
+        storage?.root?.let { directory -> clean(E2eHostPhase.CLEANUP_STORAGE) { Files.walk(directory).use { files -> files.sorted(Comparator.reverseOrder()).forEach(Files::delete) } } }
         root?.let { directory ->
-            privateFiles.forEach { name -> clean { Files.deleteIfExists(directory.resolve(name)) } }
+            privateFiles.forEach { name -> clean(E2eHostPhase.CLEANUP_CONTROL) { Files.deleteIfExists(directory.resolve(name)) } }
         }
         check(!cleanupFailed)
     }
