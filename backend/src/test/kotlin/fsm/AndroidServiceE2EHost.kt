@@ -119,7 +119,7 @@ private class ServiceE2eFixture : AutoCloseable {
     private var root: Path? = null
     private var storage: PhotoStorage? = null
     private var db: Database? = null
-    private var stopServer: (() -> Unit)? = null
+    private val serverStop = AtomicReference<(() -> Unit)?>(null)
     private var schemaCreated = false
     private lateinit var jdbc: String
     private lateinit var dbUser: String
@@ -233,7 +233,8 @@ private class ServiceE2eFixture : AutoCloseable {
                 }
             }
         }
-        stopServer = { server.stop(100, 2000) }
+        serverStop.set { server.stop(100, 2000) }
+        try {
         server.start(wait = false)
         port = server.engine.resolvedConnectors().single().port
         readyAt = Instant.now()
@@ -264,7 +265,20 @@ private class ServiceE2eFixture : AutoCloseable {
         val result = read("android-result.json", resultKeys)
         withTimeout(30_000) { runInterruptible(Dispatchers.IO) { verify(result) } }
         verifiedResult = result
+        } catch (t: Throwable) {
+            // Record the primary phase before the finally block advances to cleanup.
+            recordFailure()
+            throw t
+        } finally {
+            mark(E2eHostPhase.CLEANUP_NETTY)
+            try { stopOwnedServer() } catch (t: Throwable) { recordFailure(); throw t }
+        }
     }
+
+    // Called inside execute BEFORE runBlocking joins its application child, and again
+    // by outer/shutdown cleanup as an idempotent fallback. Synchronization also joins
+    // a concurrently in-progress stop before cleanup can close its database.
+    @Synchronized private fun stopOwnedServer() { serverStop.getAndSet(null)?.invoke() }
 
     // No PASS artifact is published until owned resource cleanup has succeeded.
     fun publishSuccess() {
@@ -407,7 +421,7 @@ private class ServiceE2eFixture : AutoCloseable {
             mark(category)
             try { block() } catch (_: Throwable) { recordFailure(); cleanupFailed = true }
         }
-        clean(E2eHostPhase.CLEANUP_NETTY) { stopServer?.invoke() }
+        clean(E2eHostPhase.CLEANUP_NETTY) { stopOwnedServer() }
         clean(E2eHostPhase.CLEANUP_DATABASE) { db?.close() }
         if (schemaCreated) clean(E2eHostPhase.CLEANUP_SCHEMA) {
             check(Regex("service_e2e_[0-9a-f]{32}").matches(schema))
