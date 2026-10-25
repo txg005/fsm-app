@@ -31,7 +31,7 @@ PG = Path('/usr/lib/postgresql/16/bin')
 STAGES = ('prepare', 'hostenv', 'compile', 'postgres', 'device', 'preflight', 'install',
           'host-ready', 'reverse', 'clock', 'fixture', 'runner', 'initial', 'close',
           'result', 'host-proof', 'cleanup', 'fixture-run-as', 'fixture-parent',
-          'fixture-directory', 'fixture-stdin', 'fixture-publish', 'fixture-verify')
+          'fixture-directory', 'publish-payload', 'publish-ready', 'publish-verify')
 STAGE = 'prepare'
 RESULT_FLAGS = ('workerQuiescent workerReservationVerified serviceObservedForeground '
                 'serviceNotificationObserved serviceSameInstanceAtClose workerQuiescentAtClose '
@@ -303,23 +303,36 @@ class ServiceDevice(Device):
         require(b'ServiceRecord{' not in raw)
 
     def app_read(self, name):
-        require(name in ('fixture', 'service-ready', 'close-observed', 'result'))
-        # Absent sentinel is not a parse failure; stderr/raw output never escapes.
+        require(name in ('fixture', 'release-service', 'close-committed',
+                         'service-ready', 'close-observed', 'result'))
         path = APPROOT + name + '.json'
-        script = ('[ -d ' + APPROOT + ' ] && [ ! -L ' + APPROOT + ' ] && '
-                  'if [ ! -e ' + path + ' ] && [ ! -L ' + path + ' ]; then printf ABSENT; '
-                  'else [ -f ' + path + ' ] && [ ! -L ' + path + ' ] && '
-                  '[ "$(stat -c %a ' + path + ')" = 600 ] && cat ' + path + '; fi')
+        ready = path + '.ready'
+        root = APPROOT.rstrip('/')
+        # Payload existence alone NEVER commits a message. Missing ready is bounded
+        # pending; a present but invalid marker/payload is an immediate failure.
+        script = ('[ -d ' + root + ' ] && [ ! -L ' + root + ' ] && '
+                  '[ "$(stat -c %a ' + root + ')" = 700 ] && '
+                  '[ "$(stat -c %u ' + root + ')" = "$(id -u)" ] && '
+                  'if [ ! -e ' + ready + ' ] && [ ! -L ' + ready + ' ]; then printf ABSENT; '
+                  'else [ -f ' + ready + ' ] && [ ! -L ' + ready + ' ] && '
+                  '[ "$(stat -c %a ' + ready + ')" = 600 ] && '
+                  '[ "$(stat -c %s ' + ready + ')" = 0 ] && '
+                  '[ "$(stat -c %u ' + ready + ')" = "$(id -u)" ] && '
+                  '[ -f ' + path + ' ] && [ ! -L ' + path + ' ] && '
+                  '[ "$(stat -c %a ' + path + ')" = 600 ] && '
+                  '[ "$(stat -c %u ' + path + ')" = "$(id -u)" ] && '
+                  '[ "$(stat -c %s ' + path + ')" -ge 1 ] && '
+                  '[ "$(stat -c %s ' + path + ')" -le 16384 ] && cat ' + path + '; fi')
         raw = self.shell('run-as com.fsm sh -c ' + shlex.quote(script), cap=16384)
         return None if raw == b'ABSENT' else decode(raw)
 
     def app_write(self, name, obj):
         require(name in ('fixture', 'release-service', 'close-committed'))
+        validate(name, obj)
         if name == 'fixture':
             stage('fixture-run-as')
             self.shell('run-as com.fsm sh -c ' + shlex.quote(':'))
             stage('fixture-parent')
-            # Fresh install need not have Context.getFilesDir() materialized yet.
             # Create only the missing fixed parent; never adopt a file or symlink.
             parent = ('umask 077; if [ ! -e files ] && [ ! -L files ]; then mkdir files || exit 1; fi; '
                       '[ -d files ] && [ ! -L files ]')
@@ -327,25 +340,31 @@ class ServiceDevice(Device):
             stage('fixture-directory')
             self.shell('run-as com.fsm sh -c ' + shlex.quote(
                 'umask 077; [ -d files ] && [ ! -L files ] && mkdir ' + APPROOT))
-            stage('fixture-stdin')
-            incoming = APPROOT + '.fixture.incoming'
-            self.shell('run-as com.fsm sh -c ' + shlex.quote(
-                'umask 077; set -C; [ -d ' + APPROOT + ' ] && [ ! -L ' + APPROOT + ' ] && cat > ' + incoming),
-                input_data=encode(obj))
-            stage('fixture-publish')
-            self.shell('run-as com.fsm sh -c ' + shlex.quote(
-                '[ -d ' + APPROOT + ' ] && [ ! -L ' + APPROOT + ' ] && '
-                '[ -f ' + incoming + ' ] && [ ! -L ' + incoming + ' ] && '
-                'ln ' + incoming + ' ' + APPROOT + 'fixture.json && rm ' + incoming))
-            stage('fixture-verify')
-            require(validate('fixture', self.app_read('fixture'), obj['runNonce']) == obj)
-            return
-        # Two shells: quote the whole remote sh -c program, stdin carries JSON only.
-        script = ('umask 077; set -C; [ -d ' + APPROOT + ' ] && [ ! -L ' + APPROOT + ' ] && '
-                  'cat > ' + APPROOT + '.' + name + '.incoming && '
-                  'ln ' + APPROOT + '.' + name + '.incoming ' + APPROOT + name + '.json && '
-                  'rm ' + APPROOT + '.' + name + '.incoming')
+        root = APPROOT.rstrip('/')
+        path = APPROOT + name + '.json'
+        ready = path + '.ready'
+        guard = ('[ -d ' + root + ' ] && [ ! -L ' + root + ' ] && '
+                 '[ "$(stat -c %a ' + root + ')" = 700 ] && '
+                 '[ "$(stat -c %u ' + root + ')" = "$(id -u)" ] && ')
+        stage('publish-payload')
+        # Both fixed names must be absent before the exclusive payload creation.
+        # A failed/short write leaves no ready marker and is NEVER adopted/retried.
+        script = ('umask 077; set -C; ' + guard +
+                  '[ ! -e ' + path + ' ] && [ ! -L ' + path + ' ] && '
+                  '[ ! -e ' + ready + ' ] && [ ! -L ' + ready + ' ] && cat > ' + path)
         self.shell('run-as com.fsm sh -c ' + shlex.quote(script), input_data=encode(obj))
+        stage('publish-ready')
+        # Successful cat exit has closed the complete payload before this distinct
+        # exclusive zero-byte commit. This is visibility, NOT power-loss/fsync proof.
+        script = ('umask 077; set -C; ' + guard +
+                  '[ -f ' + path + ' ] && [ ! -L ' + path + ' ] && '
+                  '[ "$(stat -c %a ' + path + ')" = 600 ] && '
+                  '[ "$(stat -c %u ' + path + ')" = "$(id -u)" ] && '
+                  '[ "$(stat -c %s ' + path + ')" = ' + str(len(encode(obj))) + ' ] && '
+                  '[ ! -e ' + ready + ' ] && [ ! -L ' + ready + ' ] && : > ' + ready)
+        self.shell('run-as com.fsm sh -c ' + shlex.quote(script))
+        stage('publish-verify')
+        require(validate(name, self.app_read(name), obj['runNonce']) == obj)
 
     def runtime(self, pid):
         return runtime_service(self.shell('dumpsys activity -a services com.fsm'), pid)

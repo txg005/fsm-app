@@ -46,6 +46,7 @@ import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.PosixFilePermission
+import java.nio.file.attribute.PosixFilePermissions
 import java.security.KeyStore
 import java.time.Instant
 import java.util.UUID
@@ -126,10 +127,20 @@ class ServiceE2ETest {
         check(root.canonicalFile==File(app.filesDir.canonicalFile,"service-e2e-v1"))
         return File(root,name)
     }
+    private val privatePermissions=setOf(PosixFilePermission.OWNER_READ,PosixFilePermission.OWNER_WRITE)
+    private fun ready(name:String):Boolean {
+        checkedPath(name)
+        val marker=File(root,"$name.ready").toPath()
+        if(!Files.exists(marker,LinkOption.NOFOLLOW_LINKS)) return false
+        check(Files.isRegularFile(marker,LinkOption.NOFOLLOW_LINKS) &&
+            Files.getPosixFilePermissions(marker,LinkOption.NOFOLLOW_LINKS)==privatePermissions && Files.size(marker)==0L)
+        return true
+    }
     private inline fun <reified T> read(name:String,shape:Shape):T {
+        check(ready(name)) // Never consume a payload while its producer may still be writing.
         val file=checkedPath(name)
-        check(Files.getPosixFilePermissions(file.toPath(),LinkOption.NOFOLLOW_LINKS)==
-            setOf(PosixFilePermission.OWNER_READ,PosixFilePermission.OWNER_WRITE))
+        check(Files.isRegularFile(file.toPath(),LinkOption.NOFOLLOW_LINKS) &&
+            Files.getPosixFilePermissions(file.toPath(),LinkOption.NOFOLLOW_LINKS)==privatePermissions)
         val bytes=FileChannel.open(file.toPath(),StandardOpenOption.READ,LinkOption.NOFOLLOW_LINKS).use {channel ->
             check(channel.size() in 1..16384)
             val buffer=ByteBuffer.allocate(channel.size().toInt())
@@ -159,17 +170,18 @@ class ServiceE2ETest {
         val target=checkedPath(name)
         val text=json.encodeToString(value)
         check(text.toByteArray(Charsets.UTF_8).size in 1..16384)
-        val temp=File(root,"$name.tmp")
-        FileChannel.open(temp.toPath(),StandardOpenOption.CREATE_NEW,StandardOpenOption.WRITE,LinkOption.NOFOLLOW_LINKS).use {
+        val marker=File(root,"$name.ready").toPath()
+        check(!Files.exists(target.toPath(),LinkOption.NOFOLLOW_LINKS) && !Files.exists(marker,LinkOption.NOFOLLOW_LINKS))
+        val attributes=PosixFilePermissions.asFileAttribute(privatePermissions)
+        FileChannel.open(target.toPath(),setOf(StandardOpenOption.CREATE_NEW,StandardOpenOption.WRITE,LinkOption.NOFOLLOW_LINKS),attributes).use {
             val data=ByteBuffer.wrap(text.toByteArray(Charsets.UTF_8))
             while(data.hasRemaining()) it.write(data)
             it.force(true)
         }
-        check(temp.setReadable(false,false) && temp.setWritable(false,false))
-        check(temp.setReadable(true,true) && temp.setWritable(true,true))
-        // Atomic publish with NO overwrite (unlike rename/ATOMIC_MOVE on an existing target).
-        Files.createLink(target.toPath(),temp.toPath())
-        check(temp.delete())
+        check(Files.getPosixFilePermissions(target.toPath(),LinkOption.NOFOLLOW_LINKS)==privatePermissions)
+        // Publish completion only after closing the create-once payload; no hard links or rename.
+        FileChannel.open(marker,setOf(StandardOpenOption.CREATE_NEW,StandardOpenOption.WRITE,LinkOption.NOFOLLOW_LINKS),attributes).use { }
+        check(ready(name))
     }
     private fun hash(value:String)=sha256(value.toByteArray(Charsets.UTF_8))
     private fun instant(value:String):Instant {check(utcMillis.matches(value)); return Instant.parse(value)}
@@ -234,7 +246,7 @@ class ServiceE2ETest {
         check(app.getSharedPreferences("account",Context.MODE_PRIVATE).all.isEmpty())
         check(app.databaseList().none {it.startsWith("fsm_")})
         check(File(app.filesDir,"accounts").listFiles().isNullOrEmpty() && tokenFiles().isEmpty())
-        check(root.listFiles().orEmpty().map {it.name}==listOf("fixture.json"))
+        check(root.listFiles().orEmpty().map {it.name}.toSet()==setOf("fixture.json","fixture.json.ready"))
         check(app.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)==PackageManager.PERMISSION_GRANTED)
         check(wm.getWorkInfosForUniqueWork("sync_${f.employeeId}").get(5,TimeUnit.SECONDS).isEmpty())
         check(!KeyStore.getInstance("AndroidKeyStore").apply {load(null)}.containsAlias("fsm_refresh_${f.employeeId}"))
@@ -299,13 +311,13 @@ class ServiceE2ETest {
         rows[rowIndex].performScrollTo().performClick()
         queuedScreen()
         write("service-ready.json",ServiceReady(1,nonce,initial.pid,initial.activeSince,true,true,true,true))
-        until(30000) {reservation(); requireForeground(initial); Files.exists(checkedPath("release-service.json").toPath(),LinkOption.NOFOLLOW_LINKS)}
+        until(30000) {reservation(); requireForeground(initial); ready("release-service.json")}
         val released=read<ServiceRelease>("release-service.json",releaseShape)
         check(released.schemaVersion==1 && released.runNonce==nonce && released.servicePid==initial.pid && released.serviceActiveSince==initial.activeSince)
         check(released.dataSyncObserved && released.workerQuiescent && released.workerReservationVerified)
         queuedScreen(); reservation(); requireForeground(initial)
         SyncGate.mutex.unlock(gateOwner); ownsGate=false
-        until(60000) {reservation(); requireForeground(initial); Files.exists(checkedPath("close-committed.json").toPath(),LinkOption.NOFOLLOW_LINKS)}
+        until(60000) {reservation(); requireForeground(initial); ready("close-committed.json")}
         val committed=read<CloseCommitted>("close-committed.json",committedShape)
         check(committed.schemaVersion==1 && committed.runNonce==nonce && uuidPattern.matches(committed.gateNonce) && committed.closeOperationId==close.id)
         val commitAt=instant(committed.hostCommittedAt).toEpochMilli(); val releaseAt=instant(committed.releaseDeadlineAt).toEpochMilli()
@@ -396,7 +408,11 @@ class ServiceE2ETest {
                 val alias="fsm_refresh_${f.employeeId}"
                 KeyStore.getInstance("AndroidKeyStore").apply {load(null)}.let {if(it.containsAlias(alias)) it.deleteEntry(alias)}
             }
-            if(emptyStorageProven) check(checkedPath("fixture.json").delete())
+            if(emptyStorageProven) {
+                check(ready("fixture.json"))
+                check(File(root,"fixture.json.ready").delete())
+                check(checkedPath("fixture.json").delete())
+            }
         } finally {
             // Also release on foreign-ownership / malformed-file cleanup failure, without deletion.
             if(ownsGate) {SyncGate.mutex.unlock(gateOwner); ownsGate=false}
