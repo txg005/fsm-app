@@ -26,7 +26,6 @@ UUID = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a
 SHA = re.compile(r'[0-9a-f]{64}')
 STAMP = re.compile(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z')
 JPEG = '4a0043beb47e76e4bf6a12e9d93832dc69d596c8d1b114870e17f9d1420d61bf'
-OUT = Path('android/app/build/outputs/service-e2e')
 PG = Path('/usr/lib/postgresql/16/bin')
 STAGES = ('prepare', 'hostenv', 'compile', 'postgres', 'device', 'preflight', 'install',
           'host-ready', 'reverse', 'clock', 'fixture', 'runner', 'initial', 'close',
@@ -177,6 +176,29 @@ def publish(path, obj):
         os.link(name, path, follow_symlinks=False)
     finally:
         os.unlink(name)
+
+
+def publish_artifacts(ready, result, proof, nonce):
+    # Lexical checkout binding, NOT resolve-and-adopt of an existing symlink tree.
+    repo = Path(os.path.abspath(__file__)).parents[2]
+    require(repo == Path.cwd() and repo.resolve() == repo)
+    info = repo.lstat()
+    require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & 0o022)
+    parent = repo
+    for part in ('android', 'app', 'build', 'outputs'):
+        parent = parent / part
+        info = parent.lstat()
+        require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & 0o022)
+    objects = (('ready', ready), ('result', result), ('hostproof', proof))
+    for name, obj in objects:
+        validate(name, obj, nonce)
+    output = parent / 'service-e2e'
+    require(not output.exists() and not output.is_symlink())
+    output.mkdir(mode=0o700)  # Exclusive fresh directory; never resume partial output.
+    for name, obj in objects:
+        publish(output / (name + '.json'), obj)
+        require(read_private(output / (name + '.json')) == encode(obj))
+    require({p.name for p in output.iterdir()} == {'ready.json', 'result.json', 'hostproof.json'})
 
 
 class Capture:
@@ -631,10 +653,7 @@ def run():
         stage('host-proof-control-clean')
         require({p.name for p in control.iterdir()} == {'ready.json', 'result.json', 'hostproof.json'})
         stage('host-proof-artifact')
-        require(not OUT.exists() and not OUT.is_symlink())
-        OUT.mkdir(parents=True, mode=0o700)
-        for name, obj in [('ready', ready), ('result', result), ('hostproof', proof)]:
-            publish(OUT / (name + '.json'), obj)
+        publish_artifacts(ready, result, proof, nonce)
         completed = True
     finally:
         # Do not abort then claim host waits for Android: backend abort tears server down.
