@@ -6,9 +6,28 @@
 
 Документ фиксирует выполненные проверки, пользовательские сообщения о ручном прогоне и ещё не проверенные сценарии. Успешная сборка не означает исполнения instrumentation tests или полной приёмки на физическом устройстве.
 
-## Актуальный статус: main `0c3f0ed…`
+## Актуальный статус: main `c651a29…`
 
-Источник актуального автоматического результата — [CI run 39741466813](https://github.com/txg005/fsm-app/actions/runs/39741466813) на commit `0c3f0ed0e4e4ba630b4f1bb66e8d530d7808c292`. Все три job завершились успешно; report-gate annotations фиксируют фактически исполненные XML cases, а не только компиляцию APK.
+После объединения PR9–12 проверен exact main **`c651a29c659f79baa3f39e5d8ef61d56300d0856`**: [итоговый CI run 39797634913](https://github.com/txg005/fsm-app/actions/runs/39797634913). Это evidence объединённого кода, не прогноз результата следующего docs PR.
+
+| Среда / источник | Фактический результат | Граница вывода |
+| --- | --- | --- |
+| CI Backend PostgreSQL | **9 unit + 15 integration**, 0 failures/errors/skips; installDist PASS | Hosted Linux + PostgreSQL; HTTP testApplication, не Netty packet-drop/crash-kill |
+| CI Android build | **25 JVM**, 0 failures/errors/skips; lint **0 errors**; app + test APK PASS | Число latest lint warnings не пересчитано; не гарантия APK upgrade |
+| CI Android emulator | **21 instrumentation**, 0 failures/errors/skips, API36/KVM | 15 Room/media/engine + 6 lifecycle/Compose; одно hosted-device окружение, не физический телефон |
+
+### Stage3: что добавилось и что действительно исправлено
+
+- [Первый runtime run 39745307730](https://github.com/txg005/fsm-app/actions/runs/39745307730): 21 tests, 1 failure, 0 errors/skips. `savingRemainsTrueUntilEveryQueuedLocalWriteFinishes` дошёл до assertion «Saving must remain true while the latest local write is blocked»: первая запись уже сохранена, последняя ещё ожидает. Это реальный ранний сброс `saving`, не timeout fixture.
+- Минимальный fix в FsmModel: счётчик pending saves вместо безусловного `saving=false` в каждом finally; editLock/Room сохранены, отмена пробрасывается, decrement выполняется в finally. Исходная регрессия не ослаблена. Итоговый merged run выше: **все21 GREEN**.
+- Шесть lifecycle tests проверяют login/list/detail/form/close: landscape/IME, сохранение route/выбора и ввода при Activity recreation, локальную очередь записей, блокировки QUEUED и отображение Room ACK/CLOSED/ошибок. **Activity recreation — не process death. Room ACK вводится fixture-транзакцией: это Room → UI, не Service/upload/live-backend E2E.** Полной ручной матрицы это не заменяет.
+- Четыре новые backend-регрессии PR12: одинаковые upload key/body в конкурентных запросах дают один photo/blob и точный receipt/replay; разные ключи одной фотографии сохраняют два receipts и общий server ref; после переназначения заявки старые собственные upload/close receipts и attached/staged photos недоступны прежнему инженеру; один operation UUID независимо работает в двух employee scopes. Проверяются HTTP-ответы, SQL counts/сохранённые receipts, приватные binary reads и bytes файлов. Client barrier не доказывает все DB interleavings; crash-kill/сетевой packet-drop этим не проверены.
+
+**Не all-acceptance PASS.** Process-death и Netty packet-drop — ещё не проверенные продолжения, не результат этого run. Физический телефон, полная permission/Service/account-switch матрица остаются ниже. Подпись debug APK между средами может различаться; правила сохранности данных и signing ниже остаются в силе.
+
+## Предыдущая CI-точка: main `0c3f0ed…`
+
+Исторический автоматический результат — [CI run 39741466813](https://github.com/txg005/fsm-app/actions/runs/39741466813) на commit `0c3f0ed0e4e4ba630b4f1bb66e8d530d7808c292`. Все три job завершились успешно; report-gate annotations фиксируют фактически исполненные XML cases, а не только компиляцию APK.
 
 | Среда / источник | Фактический результат | Граница вывода |
 | --- | --- | --- |
@@ -20,11 +39,11 @@
 
 Workflow/gate сохраняет в имени «14 baseline tests», но допускает дополнительные tests: исходные14 методов сохранены, EXIF regression расширен на8 orientations и добавлен no-EXIF case; actual total15. Android25 JVM =13 контрактных +12 UI-mapping tests. Подробности среды/команд/артефактов — [CI.md](CI.md); bootstrap/Windows — [BUILD-WINDOWS.md](BUILD-WINDOWS.md). CI не запускает environment-specific Netty smoke; его прежний успешный результат приведён ниже отдельно.
 
-**Это не all-acceptance PASS.** Следующий этап landscape/recreation/lifecycle ещё проверяется отдельно; его будущие результаты этому commit/run не приписываются. Короткий сценарий защиты — [DEMO.md](DEMO.md); прохождение сценария также записывается отдельно, а не выводится из наличия инструкции.
+**Это не all-acceptance PASS.** На этой предыдущей точке Stage3 ещё не был выполнен; его последующие результаты приведены выше и не приписываются старому run. Короткий сценарий защиты — [DEMO.md](DEMO.md); прохождение сценария также записывается отдельно, а не выводится из наличия инструкции.
 
 ## История первого этапа (baseline до CI/UI/EXIF продолжения)
 
-Ниже сохранены первоначальные версии и результаты: выражение «только скомпилированы» описывает **тот baseline**, не актуальный статус15 tests выше.
+Ниже сохранены первоначальные версии и результаты: выражение «только скомпилированы» описывает **тот baseline**, не актуальный статус21 tests выше.
 
 ### Проверенные версии baseline
 
@@ -66,13 +85,15 @@ XML-сводки тестов сверены координатором. Пол�
 4. Android: недостоверный success response после dispatch означает UNKNOWN_OUTCOME с повтором того же operationId и frozen bytes, а не неповторяемый FAILED. Ошибки локального файла до отправки отделены.
 5. Backend multipart: реальные Ktor 3.1.3 bytes до правки воспроизвели 400. Теперь необязательный одиночный per-part Content-Length принимается только при ASCII decimal, попадании в Long и точном равенстве фактическому числу bytes. Проверки двух частей, MIME, JPEG, hash, размеров, порядка и дубликатов сохранены. Реальная Ktor HTTP/PG-регрессия и Netty smoke прошли.
 
+6. Android Stage3: реальный RED на очереди локальных сохранений устранён минимальным pending-count fix; неизменённый regression и остальные20 instrumentation cases прошли в итоговом merged run выше.
+
 QA: все перечисленные блокирующие замечания закрыты в границах целевого review. Это не утверждение об отсутствии любых дефектов.
 
 ## Непроверенное и ограничения
 
-- Baseline gap исполнения14 tests закрыт указанным CI run: реально выполнены15. Это не закрывает физический телефон, Compose UI rotation/recreation или live-backend E2E во всех отказах.
+- Baseline gap исполнения14 tests закрыт: итоговый CI реально выполнил21 (15 Room/media/engine +6 lifecycle/Compose). Ограниченный landscape/Activity recreation покрыт на одном API36 hosted-эмуляторе, не на физическом телефоне и не во всех отказах live backend.
 - Физический Android-телефон: камера/Photo Picker, GPS, Keystore, разрешения, FGS и ограничения конкретного производителя.
-- Полная матрица landscape/клавиатуры/rotation, Activity recreation, process death/force-stop/timeout/cancel и переключения аккаунтов во время передачи. Room/engine regressions исполнялись в CI, но не заменяют эту UI/ОС матрицу. Результаты Stage3 пока не зафиксированы здесь.
+- Полная матрица landscape/клавиатуры/rotation на других устройствах, process death/force-stop/timeout/cancel и переключения аккаунтов во время реальной передачи. Шесть Stage3 UI tests выше закрывают ограниченный Activity recreation, но не заменяют эту UI/ОС матрицу. Новые process-death и Netty packet-drop проверки ещё не выполнены.
 - Docker: локальный запуск на Windows подтверждён пользователем; формальные контейнерные/volume durability tests, уничтожение питания, перезапуск хоста и потеря диска не выполнялись.
 - Production TLS/reverse proxy, публичное развёртывание, нагрузка и исчерпывающий security/fuzz testing не проверены.
 - Room schema v1: upgrade migration не заявляется. После аварии до callback камеры может остаться приватный scratch-файл без автоматического срока очистки.
@@ -80,12 +101,12 @@ QA: все перечисленные блокирующие замечания 
 
 ## Непройденная ручная матрица Stage3
 
-Это список к выполнению, не протокол успешного прогона. Для каждой строки записать commit/APK origin, устройство/API, точные шаги, результат и evidence без секретов/точных координат. Подпись APK проверять отдельно; тестовые данные не сбрасывать ради результата.
+Это оставшаяся ручная матрица, не протокол полного успешного прогона. Ограниченные автоматические результаты Stage3 приведены отдельно выше. Для каждой строки записать commit/APK origin, устройство/API, точные шаги, результат и evidence без секретов/точных координат. Подпись APK проверять отдельно; тестовые данные не сбрасывать ради результата.
 
 | Проверка | Что считать успехом | Статус |
 | --- | --- | --- |
-| Portrait/landscape всех5 основных экранов, IME/прокрутка | Кнопки/ошибки доступны, сохранённый ввод/выбранная заявка не теряются | Не зафиксировано |
-| Activity recreation с сохранённым draft и при передаче | Сохранённые поля/фото/route согласованы; ACK/CLOSED не выдуман | Не зафиксировано |
+| Portrait/landscape всех5 основных экранов, IME/прокрутка | Кнопки/ошибки доступны, сохранённый ввод/выбранная заявка не теряются | CI Stage3: ограниченно проверено на API36; полная ручная/device матрица не пройдена |
+| Activity recreation с сохранённым draft и при передаче | Сохранённые поля/фото/route согласованы; ACK/CLOSED не выдуман | CI Stage3: local draft/QUEUED/Room ACK → UI проверены; реальный Service E2E не пройден |
 | Реальный process stop/reopen offline, затем Service retry | UUID/frozen bytes/local media сохранены; итоговое закрытие одно | Пользовательский основной прогон есть; полная контролируемая матрица не пройдена |
 | Cancel/Home/возврат, notifications denied, FGS ограничения | Нет false ACK, отмена передачи не отменяет close; продолжение только допустимым ОС способом | Не зафиксировано полностью |
 | GPS denied/approximate/disabled/timeout + camera/picker cancel | Честный MISSING либо свежий fix, фото/результат не теряются | Один фото/GPS user report есть; полная матрица не пройдена |
