@@ -31,7 +31,15 @@ PG = Path('/usr/lib/postgresql/16/bin')
 STAGES = ('prepare', 'hostenv', 'compile', 'postgres', 'device', 'preflight', 'install',
           'host-ready', 'reverse', 'clock', 'fixture', 'runner', 'initial', 'close',
           'result', 'host-proof', 'cleanup', 'fixture-run-as', 'fixture-parent',
-          'fixture-directory', 'publish-payload', 'publish-ready', 'publish-verify')
+          'fixture-directory', 'publish-payload', 'publish-ready', 'publish-verify',
+          'host-proof-wait', 'host-proof-exit', 'host-proof-output',
+          'host-proof-proof-read', 'host-proof-schema', 'host-proof-ready-match',
+          'host-proof-result-match', 'host-proof-control-clean', 'host-proof-artifact')
+HOST_FAILURES = frozenset(('STARTUP CLOSE_SQL CLOSE_RELEASE RESULT_CONTROL RESULT_SQL PHOTO_SQL '
+                           'RECEIPTS_SQL RECEIPT_HASH BLOB OWN_AUTH OWN_JPEG OWN_HEADERS '
+                           'FOREIGN_AUTH FOREIGN_404 CLEANUP_NETTY CLEANUP_DATABASE '
+                           'CLEANUP_SCHEMA CLEANUP_STORAGE CLEANUP_CONTROL '
+                           'PUBLISH_RESULT PUBLISH_PROOF').split())
 STAGE = 'prepare'
 RESULT_FLAGS = ('workerQuiescent workerReservationVerified serviceObservedForeground '
                 'serviceNotificationObserved serviceSameInstanceAtClose workerQuiescentAtClose '
@@ -212,6 +220,28 @@ class Capture:
         self.err.close()
         if self.input is not None:
             self.input.close()
+
+
+def finish_host(host):
+    """Diagnose one private host child without exposing its output or relaxing success."""
+    stage('host-proof-wait')
+    while host.proc.poll() is None:
+        host.check()
+        time.sleep(.05)
+    host.check()
+    stage('host-proof-exit')
+    host.out.seek(0)
+    token = host.out.read(97)  # one <=96-byte ASCII token; never decode/print raw data.
+    if host.proc.returncode != 0:
+        match = re.fullmatch(rb'E2E_HOST_FAILED:([A-Z0-9_]+)\n', token) if host.proc.returncode == 1 and len(token) <= 96 else None
+        category = match[1].decode('ascii') if match is not None else None
+        # Only the independently enumerated category, never a token substring, is public.
+        if category not in HOST_FAILURES:
+            category = 'INVALID_TOKEN'
+        print('::error::Service E2E host failure category: ' + category, flush=True)
+        require(False)
+    stage('host-proof-output')
+    require(token == b'E2E_HOST_PASS\n')
 
 
 def command(args, seconds=10, cap=1024*1024, **kwargs):
@@ -589,11 +619,18 @@ def run():
         publish(control / 'outcome.json', validate('outcome', {'schemaVersion': 1, 'runNonce': nonce, 'androidExitCode': 0}, nonce))
         stage('host-proof')
         host.deadline = min(host.deadline, time.monotonic() + 40)
-        require(host.finish().strip() == b'E2E_HOST_PASS')
-        proof = validate('hostproof', decode(read_private(control / 'hostproof.json')), nonce)
+        finish_host(host)
+        stage('host-proof-proof-read')
+        proof_data = decode(read_private(control / 'hostproof.json'))
+        stage('host-proof-schema')
+        proof = validate('hostproof', proof_data, nonce)
+        stage('host-proof-ready-match')
         require(validate('ready', decode(read_private(control / 'ready.json')), nonce) == ready)
+        stage('host-proof-result-match')
         require(validate('result', decode(read_private(control / 'result.json')), nonce) == result)
+        stage('host-proof-control-clean')
         require({p.name for p in control.iterdir()} == {'ready.json', 'result.json', 'hostproof.json'})
+        stage('host-proof-artifact')
         require(not OUT.exists() and not OUT.is_symlink())
         OUT.mkdir(parents=True, mode=0o700)
         for name, obj in [('ready', ready), ('result', result), ('hostproof', proof)]:
