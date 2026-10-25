@@ -5,7 +5,7 @@
 `.github/workflows/verification.yml` runs on every pull request (including draft
 PRs), pushes to `main`, and manual dispatch once
 GitHub exposes the workflow on the default branch. No merge is required for a PR
-run. There are no path filters, so every PR receives the same three checks.
+run. There are no path filters, so every PR receives the same four checks (including the separate Service E2E job).
 
 All jobs use standard `ubuntu-24.04` GitHub-hosted runners and Temurin JDK17:
 
@@ -13,7 +13,7 @@ All jobs use standard `ubuntu-24.04` GitHub-hosted runners and Temurin JDK17:
 | --- | --- | --- |
 | Backend PostgreSQL | `sh gradlew --no-daemon --no-parallel --max-workers=1 -Pkotlin.compiler.execution.strategy=in-process test integrationTest installDist --console=plain` | 25 minutes |
 | Android SDK36 build and lint | `sh gradlew --no-daemon --no-parallel --max-workers=1 testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest --console=plain` | 30 minutes |
-| Android instrumentation API36 | `sh gradlew --no-daemon --no-parallel --max-workers=1 connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.notClass=com.fsm.restart.ProcessRestartTest --console=plain`, then `bash ../scripts/ci/android_process_restart.sh` | 35 minutes; emulator step 25, boot 10 |
+| Android instrumentation API36 | `sh gradlew --no-daemon --no-parallel --max-workers=1 connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.notClass=com.fsm.restart.ProcessRestartTest,com.fsm.servicee2e.ServiceE2ETest --console=plain`, then `bash ../scripts/ci/android_process_restart.sh` | 35 minutes; emulator step 25, boot 10 |
 
 The PostgreSQL15.10 service has a health check and an isolated job-lifetime DB.
 Its published password is intentionally a disposable CI fixture, not a secret
@@ -201,3 +201,104 @@ maintainer action, report that blocker without merging to activate CI.
 - [Android16 attach to existing process and finish without force-stop](https://android.googlesource.com/platform/frameworks/base/+/android-16.0.0_r1/services/core/java/com/android/server/am/ActivityManagerService.java)
 - [Android16 default-network diagnostic](https://android.googlesource.com/platform/packages/modules/Connectivity/+/android-16.0.0_r1/service/src/com/android/server/ConnectivityService.java)
 - [Android16 svc Wi-Fi/data command delegation](https://android.googlesource.com/platform/frameworks/base/+/android-16.0.0_r1/cmds/svc/svc.sh)
+
+## Positive Service HTTP E2E — isolated opt-in harness
+
+A separate standard `ubuntu-24.04` job requires >=7 GiB physical RAM, KVM,
+JDK17, SDK36 and preinstalled **native PostgreSQL16** (client/server/control
+major16 and actual `server_version_num` 160000..169999). It creates only its own
+private cluster/socket/ephemeral loopback port/database; no apt repository,
+installer, global PostgreSQL service, paid/custom runner or repository secret.
+The existing Docker PostgreSQL15 backend regression job remains unchanged.
+Runtime version is reported as an integer only, not a PG15 compatibility claim.
+
+Entry points: `bash scripts/ci/android_service_e2e.sh prepare|run|cleanup`.
+Preparation finishes backend `testClasses`/private classpath export and debug APK
+compilation **before** starting the dedicated fresh online API36 emulator. The
+opt-in init script is `scripts/ci/service_e2e_classpath.init.gradle.kts`, task
+`exportServiceE2eClasspath`, property `serviceE2eClasspathOutput` points at an
+absolute nonexistent private output file. It never prints or artifacts the
+classpath. The explicit test-source executable is `fsm.AndroidServiceE2EHost`
+with `-Xmx384m -XX:MaxMetaspaceSize=192m -XX:ActiveProcessorCount=2` and
+`-Dfsm.serviceE2e.controlRoot=<nonexistent owned child>`. Child-only disposable
+`TEST_DATABASE_*` plus `FSM_SERVICE_E2E_DISPOSABLE=1` are generated privately.
+No baseline JUnit test waits for this executable (no `@Test`/`@Tag`).
+
+Both phase classes are atomically excluded from ordinary discovery using
+`notClass=com.fsm.restart.ProcessRestartTest,com.fsm.servicee2e.ServiceE2ETest`.
+The existing strict 21-case suite and separate restart seed/verify/PID protocol
+are retained, including `leaveApksInstalledAfterRun=true`. The E2E APK uses only
+the existing debug `-PfsmApiUrl=http://127.0.0.1:18080` override. It is not shared
+with the offline, marker-bearing restart emulator. No app reinstall/reset or
+clear-data fallback is allowed after setup.
+
+Only `com.fsm.servicee2e.ServiceE2ETest#visibleSendRunsForegroundServiceToRealBackendAndUpdatesUi`
+is executed, after component/user/qemu/boot and read-only empty-account/token/
+account-DB/files/Service preflight. Generic WorkManager DB is allowed. Real
+POST_NOTIFICATIONS permission is granted only afterward. One owned serial's
+reverse mapping `tcp:18080` targets the host's ephemeral port; an existing mapping
+fails, cleanup removes only this created mapping. The private synthetic fixture
+is passed over stdin to a fixed run-as CREATE_NEW/0600 file, never argv/Bundle.
+Only the host-generated `runNonce` is a test argument. Protocol JSON is compact
+UTF8 <=16KiB with strict duplicate/unknown/type/schema/nonce/time rejection and
+no overwrite/symlink adoption. Subprocess output is bounded, private and never
+printed, logged to artifacts or included in exception annotations.
+
+The actual UI send triggers the production foreground Service. Android parks
+one unique production Worker with a one-day initial delay: this is explicit test
+isolation, **not** natural Worker scheduling coverage. The initial test-held
+SyncGate is released only after host validation of Android's ready marker AND
+independent AOSP16 runtime ServiceRecord/user0/component/PID, foreground ID41,
+dataSync type0x1 and channel `sync` foreground notification. At the real close
+response's post-commit/pre-Engine barrier, backend SQL already proves committed
+result/photo/two receipts/CLOSED; Android must still see queued UI, upload ACK
+and close RUNNING. A second independent runtime snapshot must match the same
+ServiceRecord and PID before the host releases the real response. Android then
+observes real close ACK/live CLOSED in the same Activity/model/screen.
+
+Android compares exact numeric `RunningServiceInfo.activeSince` at both
+checkpoints. The host compares OS record/PID/component/FGS/type/notification and
+copies the validated Android number privately; it does **not** independently
+reconstruct numeric activeSince from human-relative dumpsys `createTime`.
+AOSP16 `Notification.flagsToString` is symbolic (`FOREGROUND_SERVICE`), not a
+numeric flags assumption. Unknown/ambiguous/missing runtime formats fail closed.
+
+The selected target requires exactly 1 started/1 passed, 0 failures/errors/skips,
+final runner code -1 and process exit0. Marker existence/ADB exit alone cannot
+pass. Exact result flags include `serviceSameInstanceAtClose`,
+`workerQuiescentAtClose`, `closeBarrierObserved` and `workerReservationVerified`.
+Persisted frozen-payload and wire-body hashes are separate, not re-encoded or
+claimed raw network capture. Backend independently verifies SQL refs/counts,
+receipts, exact private JPEG bytes and foreign-account404; host never uploads or
+closes a work order. All three final files are revalidated after Java exit0 and
+backend owned-resource cleanup. Missing/false/stale/malformed/timeout stays FAIL.
+
+Limits: job45min, preparation20min, emulator step20min/boot600s; host-ready60s,
+host overall8min after ready, Android120s plus bounded cleanup allowance,
+initial-ready30s, close barrier15s, backend final verify30s. Monotonic deadlines
+bound waits; UTC-millisecond wall times are checked, never used to extend a wait.
+On failure the orchestrator first waits bounded for Android cleanup (without
+host-side application deletion), then aborts/stops only its host. The backend's
+15s close timeout can already tear down the server: cleanup does **not** assume
+continued server availability. There is no release-on-timeout success path.
+
+After any Service-start attempt Android intentionally retains own Room DB/photos
+until disposable-emulator teardown, avoiding an unjoinable late cancellation
+logger racing DB deletion. Positive PASS is **not** proof of complete live-process
+storage cleanup or completion/join of every Service coroutine. Host owns only
+its private cluster/control/store/reverse lifecycle, never blanket adb kill,
+cancelAllWork, foreign data deletion or production credentials.
+
+Artifact allowlist (7 days) is exactly sanitized `ready.json`, `result.json`,
+`hostproof.json`, individually named under `android/app/build/outputs/service-e2e/`.
+No fixture, credentials, outcome/abort, private control/identity, classpath,
+raw XML/logs/dumps or PIDs are artifacts. Only fixed stages, validated booleans
+and counts are printed. Configuration/source/offline checks are **not** runtime
+E2E PASS; consult the actual dedicated job. This is one positive Service/HTTP/UI
+scenario, not physical power-loss, GPS/picker/permission-negative/account-switch,
+full Service interruption or a multi-device/OS matrix.
+
+Sources for the independent runtime parser:
+- [AOSP16 ServiceRecord dump and identity](https://android.googlesource.com/platform/frameworks/base/+/android-16.0.0_r1/services/core/java/com/android/server/am/ServiceRecord.java)
+- [AOSP16 RunningServiceInfo mapping](https://android.googlesource.com/platform/frameworks/base/+/android-16.0.0_r1/services/core/java/com/android/server/am/ActiveServices.java)
+- [AOSP16 symbolic notification flags](https://android.googlesource.com/platform/frameworks/base/+/android-16.0.0_r1/core/java/android/app/Notification.java)
