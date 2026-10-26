@@ -5,6 +5,21 @@ import io.ktor.http.content.OutgoingContent
 import io.ktor.server.application.*
 import io.ktor.server.engine.*
 import io.ktor.server.netty.*
+import io.ktor.server.routing.RoutingPipelineCall
+import io.ktor.util.AttributeKey
+import io.ktor.util.pipeline.PipelinePhase
+import io.netty.channel.ChannelFuture
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import java.lang.management.ManagementFactory
+import java.util.concurrent.atomic.AtomicInteger
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 import io.ktor.server.request.*
 import io.ktor.server.response.ApplicationSendPipeline
 import kotlinx.coroutines.Dispatchers
@@ -87,6 +102,33 @@ private val resultFlags = setOf("workerQuiescent", "workerReservationVerified", 
     "workerQuiescentAtClose", "closeBarrierObserved")
 private val privateFiles = setOf("fixture.json", "close-committed.json", "close-release.json", "android-result.json", "outcome.json", "abort.json")
 
+private const val interruptedScenario = "CANCEL_RETRY_V1"
+private val identityKeys = setOf("uploadOperationId", "closeOperationId", "resultId", "localPhotoId", "serverPhotoId",
+    "jpegSha256", "jpegByteSize", "resultCapturedAt", "closeFrozenPayloadSha256", "closeWireBodySha256")
+private val cancellationFlags = setOf("serviceGone", "notificationGone", "engineGateExited", "oldReservationTerminal",
+    "uploadACK", "closeRetryWait", "closeUnknownOutcome", "resultQueued", "liveUiNotSuccessful")
+private val cancellationEvidenceKeys = setOf("frozenIdentity", "closeAttempts", "retryNotBefore") + cancellationFlags
+private val cancellationKeys = cancellationEvidenceKeys + setOf("schemaVersion", "scenario", "runNonce", "attempt",
+    "attemptNonce", "gateNonce", "servicePid", "serviceActiveSince")
+private val interruptedResultFlags = setOf("firstResponseAborted", "retryBackoffElapsed", "secondServiceDistinct", "sameFrozenIdentity")
+private val interruptedResultKeys = resultKeys + interruptedResultFlags + setOf("scenario", "cancelEvidence")
+private val abandonKeys = setOf("schemaVersion", "scenario", "runNonce", "attempt", "attemptNonce", "gateNonce",
+    "closeOperationId", "action", "serviceGoneObserved", "notificationGoneObserved", "cancelProofVerified")
+private val interruptedPrivateFiles = setOf("fixture.json", "attempt-1-close-committed.json", "attempt-2-close-committed.json",
+    "cancel-observed.json", "attempt-1-close-abandon.json", "first-response-aborted.json", "attempt-2-close-release.json",
+    "android-result.json", "outcome.json", "abort.json")
+private val interruptedCallKey = AttributeKey<InterruptedCloseCall>("interrupted-close-call")
+private class InterruptedCloseCall(val root: NettyApplicationCall, val handler: Job, val attempt: Int) {
+    val abandoned = AtomicBoolean(false)
+    val completed = AtomicBoolean(false)
+    val channelClosed = AtomicBoolean(false)
+    @Volatile var completionDeadline: Long = 0
+    @Volatile var gateNonce: String? = null
+}
+// Snapshot includes exact stored response bytes/status/hash, not just decoded equivalence.
+private data class InterruptedCloseSnapshot(val canonical: String, val receipts: List<List<String>>, val operation: String,
+    val body: String)
+
 private fun JsonObject.text(key: String): String {
     val value = getValue(key) as JsonPrimitive
     check(value.isString)
@@ -111,6 +153,18 @@ private class ServiceE2eFixture : AutoCloseable {
     fun recordFailure() { firstFailure.compareAndSet(null, phase.get()) }
     fun failureCategory(): E2eHostPhase = firstFailure.get() ?: phase.get()
     private fun mark(value: E2eHostPhase) { phase.set(value) }
+    private val interrupted = System.getProperty("fsm.serviceE2e.scenario").let { value ->
+        check(value == null || value == interruptedScenario)
+        value != null
+    }
+    private val attemptNonces = listOf(newId(), newId())
+    private val closeRequests = AtomicInteger(0)
+    private val firstCall = AtomicReference<InterruptedCloseCall>()
+    private val firstSnapshot = AtomicReference<InterruptedCloseSnapshot>()
+    private val cancelProof = AtomicReference<JsonObject>()
+    private val firstAborted = AtomicBoolean(false)
+    private val secondGateEntered = AtomicBoolean(false)
+    private val secondGateReleased = AtomicBoolean(false)
     private val closed = AtomicBoolean(false)
     private val failure = AtomicBoolean(false)
     private val barrierEntered = AtomicBoolean(false)
@@ -223,17 +277,74 @@ private class ServiceE2eFixture : AutoCloseable {
             // respondText already creates TextContent(status=200). This phase is BEFORE Engine:
             // no successful close response headers/body are sent while this interceptor is waiting.
             sendPipeline.intercept(ApplicationSendPipeline.Before) {
+                if (interrupted && call.request.httpMethod == HttpMethod.Post && call.request.path() == closePath) {
+                    val rootCall = interruptedRoot(call)
+                    val owned = rootCall.attributes[interruptedCallKey]
+                    check(owned.root === rootCall)
+                    if (owned.abandoned.get()) {
+                        finish()
+                        return@intercept
+                    }
+                }
                 if (call.request.httpMethod == HttpMethod.Post && call.request.path() == closePath &&
                     (subject as? OutgoingContent)?.status == HttpStatusCode.OK) {
-                    try { closeResponseBarrier() } catch (_: Throwable) {
-                        recordFailure()
-                        failure.set(true)
-                        error("E2E close barrier failed")
+                    var interruptedOwned: InterruptedCloseCall? = null
+                    try {
+                        if (interrupted) {
+                            val rootCall = interruptedRoot(call)
+                            val owned = rootCall.attributes[interruptedCallKey]
+                            check(owned.root === rootCall)
+                            interruptedOwned = owned
+                            interruptedResponseBarrier(owned, subject as OutgoingContent)
+                            if (owned.abandoned.get()) finish()
+                        } else closeResponseBarrier()
+                    } catch (t: Throwable) {
+                        val owned = interruptedOwned
+                        if (owned != null && owned.attempt == 1 && owned.abandoned.get() && owned.channelClosed.get() &&
+                            t is CancellationException && t !is TimeoutCancellationException &&
+                            System.nanoTime() < owned.completionDeadline) {
+                            // Parent cancellation after successful controlled transport abort is expected.
+                            // ALL timeouts and any failure before validated ABANDON remain failures.
+                            finish()
+                        } else {
+                            recordFailure()
+                            failure.set(true)
+                            error("E2E close barrier failed")
+                        }
                     }
                 }
             }
         }
         serverStop.set { server.stop(100, 2000) }
+        if (interrupted) {
+            // Ktor's debug-context wrapper creates a child context only for JDWP. Reject it;
+            // capture at the FIRST engine phase, not under production IO/plugin withContext.
+            check(!ManagementFactory.getRuntimeMXBean().inputArguments.toString().contains("jdwp"))
+            val hostJob = currentCoroutineContext()[Job] ?: error("Missing host job")
+            val capture = PipelinePhase("InterruptedFixtureRootCapture")
+            server.engine.pipeline.insertPhaseBefore(EnginePipeline.Before, capture)
+            server.engine.pipeline.intercept(capture) {
+                if (call.request.httpMethod == HttpMethod.Post && call.request.path() == closePath) {
+                    try {
+                        check(call.request.queryParameters.names().isEmpty())
+                        val rootCall = call as? NettyApplicationCall ?: error("Unexpected engine call")
+                        check(rootCall.request.local.version == "HTTP/1.1")
+                        val handler = currentCoroutineContext()[Job] ?: error("Missing handler job")
+                        check(handler !== hostJob && handler.isActive)
+                        val attempt = closeRequests.incrementAndGet()
+                        check(attempt in 1..2)
+                        if (attempt == 2) {
+                            check(firstAborted.get() && firstCall.get().completed.get())
+                            check(uuid(call.request.headers["Idempotency-Key"] ?: error("Missing key")) == operationAtGate.get())
+                        }
+                        val owned = InterruptedCloseCall(rootCall, handler, attempt)
+                        rootCall.attributes.put(interruptedCallKey, owned)
+                        handler.invokeOnCompletion { owned.completed.set(true) } // Signals ONLY; never self-awaits.
+                        if (attempt == 1) check(firstCall.compareAndSet(null, owned))
+                    } catch (t: Throwable) { recordFailure(); failure.set(true); throw t }
+                }
+            }
+        }
         try {
         server.start(wait = false)
         port = server.engine.resolvedConnectors().single().port
@@ -244,16 +355,22 @@ private class ServiceE2eFixture : AutoCloseable {
             put("checklistItemIds", buildJsonArray { add(demoId(5)) })
             put("expectedJpegSha256", jpegSha); put("expectedJpegByteSize", expectedJpeg.size)
             put("login", firstLogin); put("password", syntheticPassword)
+            if (interrupted) {
+                put("scenario", interruptedScenario)
+                put("firstAttemptNonce", attemptNonces[0]); put("secondAttemptNonce", attemptNonces[1])
+            }
         })
         val ready = buildJsonObject {
             put("schemaVersion", 1); put("fixtureExpectationVersion", 1); put("runNonce", runNonce); put("hostPort", port)
             put("hostReadyAt", timestamp(readyAt)); put("hostDeadlineAt", timestamp(readyAt.plusSeconds(480)))
+            if (interrupted) put("scenario", interruptedScenario)
         }
-        check(ready.keys == readyKeys)
+        check(ready.keys == if (interrupted) readyKeys + "scenario" else readyKeys)
         publish("ready.json", ready)
         val deadline = System.nanoTime() + Duration.ofMinutes(8).toNanos()
         while (!exists("outcome.json")) {
             abortCheck()
+            if (interrupted) completeAbandonedFirst()
             check(System.nanoTime() < deadline)
             delay(50)
         }
@@ -262,8 +379,15 @@ private class ServiceE2eFixture : AutoCloseable {
         mark(E2eHostPhase.RESULT_CONTROL)
         val outcome = read("outcome.json", setOf("schemaVersion", "runNonce", "androidExitCode"))
         check(outcome.number("androidExitCode") == 0L && barrierEntered.get() && barrierReleased.get())
-        val result = read("android-result.json", resultKeys)
-        withTimeout(30_000) { runInterruptible(Dispatchers.IO) { verify(result) } }
+        if (interrupted) {
+            completeAbandonedFirst()
+            check(firstAborted.get() && closeRequests.get() == 2 && secondGateEntered.get() && secondGateReleased.get())
+        }
+        val result = read("android-result.json", if (interrupted) interruptedResultKeys else resultKeys)
+        withTimeout(30_000) { runInterruptible(Dispatchers.IO) {
+            if (interrupted) verifyInterruptedFinal(result)
+            verify(result)
+        } }
         verifiedResult = result
         } catch (t: Throwable) {
             // Record the primary phase before the finally block advances to cleanup.
@@ -289,6 +413,10 @@ private class ServiceE2eFixture : AutoCloseable {
         publish("hostproof.json", buildJsonObject {
             put("schemaVersion", 1); put("runNonce", runNonce); put("status", "PASS")
             put("sqlVerified", true); put("receiptsVerified", true); put("privateJpegVerified", true); put("foreignPhoto404", true)
+            if (interrupted) {
+                put("scenario", interruptedScenario); put("cancelUnknownOutcomeVerified", true)
+                put("firstResponseAborted", true); put("replayReceiptUnchanged", true); put("singleBusinessEffect", true)
+            }
         })
     }
 
@@ -326,6 +454,186 @@ private class ServiceE2eFixture : AutoCloseable {
         // The CI controller independently validates the private same-instance/FGS checkpoints.
         // This host does not claim that untrusted boolean fields alone prove Android ownership.
         barrierReleased.set(true)
+    }
+
+    private fun interruptedRoot(call: PipelineCall): NettyApplicationCall {
+        val rootCall = if (call is RoutingPipelineCall) call.engineCall else call
+        val netty = rootCall as? NettyApplicationCall ?: error("Unexpected call wrapper")
+        check(netty.request.local.version == "HTTP/1.1")
+        return netty
+    }
+
+    private fun checkAttempt(obj: JsonObject, attempt: Int) {
+        check(obj.number("attempt") == attempt.toLong() && obj.identifier("attemptNonce") == attemptNonces[attempt - 1])
+    }
+    private fun checkScenario(obj: JsonObject) { check(obj.text("scenario") == interruptedScenario) }
+
+    private fun interruptedSnapshot(): InterruptedCloseSnapshot = transaction { c ->
+        check(c.count("inspection_results") == 1 && c.count("photos") == 1 && c.count("idempotency_receipts") == 2)
+        val canonical = c.order(employee, order)
+        check(canonical.status == OrderStatus.CLOSED && canonical.revision == 2L && canonical.result!!.photos.size == 1)
+        check(c.query("SELECT state FROM photos") { it.getString(1) }.single() == "ATTACHED")
+        val receipts = c.query("SELECT * FROM idempotency_receipts WHERE employee_id=? ORDER BY operation_id", id(employee)) {
+            listOf(it.getString("operation_id"), it.getString("method"), it.getString("path"), it.getInt("status").toString(),
+                it.getString("semantic_hash"), it.getString("body"))
+        }
+        check(receipts.size == 2)
+        val close = receipts.single { it[1] == "POST" && it[2] == closePath && it[3] == "200" }
+        InterruptedCloseSnapshot(encode(canonical), receipts, uuid(close[0]), close[5])
+    }
+
+    private fun validateCancellation(proof: JsonObject, owned: InterruptedCloseCall, gate: String): JsonObject {
+        checkScenario(proof); checkAttempt(proof, 1)
+        check(proof.identifier("gateNonce") == gate)
+        check(proof.number("servicePid") in 1..Int.MAX_VALUE.toLong() && proof.number("serviceActiveSince") > 0)
+        cancellationFlags.forEach(proof::yes)
+        check(proof.number("closeAttempts") == 1L)
+        proof.instant("retryNotBefore") // Eligibility is observed on the real device, not inferred from clock equality.
+        val identity = proof.getValue("frozenIdentity").jsonObject
+        check(identity.keys == identityKeys)
+        val canonical = decode<WorkOrder>(firstSnapshot.get().canonical.toByteArray(Charsets.UTF_8))
+        val final = canonical.result!!
+        val photo = final.photos.single()
+        check(identity.identifier("closeOperationId") == operationAtGate.get())
+        check(identity.identifier("resultId") == final.id && identity.identifier("localPhotoId") == photo.id)
+        check(identity.identifier("serverPhotoId") == photo.serverPhotoId)
+        check(identity.digest("jpegSha256") == jpegSha && identity.number("jpegByteSize") == expectedJpeg.size.toLong())
+        check(identity.instant("resultCapturedAt") == Instant.parse(final.capturedAt))
+        identity.digest("closeFrozenPayloadSha256")
+        val hash = identity.digest("closeWireBodySha256")
+        val receipts = firstSnapshot.get().receipts
+        val close = receipts.single { it[0] == operationAtGate.get() }
+        check(close[4] == sha("POST\n$closePath\n$hash".toByteArray(Charsets.UTF_8)))
+        val upload = receipts.single { it[0] == identity.identifier("uploadOperationId") }
+        check(upload[1] == "POST" && upload[2] == uploadPath && upload[3] == "201")
+        val metadata = PhotoMetadata(photo.id, "image/jpeg", expectedJpeg.size.toLong(), jpegSha)
+        check(upload[4] == uploadHash(uploadPath, metadata))
+        check(decode<UploadReceipt>(upload[5].toByteArray(Charsets.UTF_8)) == UploadReceipt(upload[0], photo))
+        check(interruptedSnapshot() == firstSnapshot.get())
+        check(owned.root.request.headers["Idempotency-Key"] == identity.text("closeOperationId"))
+        return identity
+    }
+
+    private suspend fun interruptedResponseBarrier(owned: InterruptedCloseCall, content: OutgoingContent) {
+        // All operations belong to the genuine module; this gate sees its committed response only.
+        mark(E2eHostPhase.CLOSE_SQL)
+        check(!owned.root.response.isCommitted)
+        val snapshot = interruptedSnapshot()
+        val bytes = (content as? OutgoingContent.ByteArrayContent)?.bytes() ?: error("Unexpected response body")
+        check(bytes.contentEquals(snapshot.body.toByteArray(Charsets.UTF_8)))
+        check(uuid(owned.root.request.headers["Idempotency-Key"] ?: error("Missing key")) == snapshot.operation)
+        if (owned.attempt == 1) {
+            check(barrierEntered.compareAndSet(false, true) && firstSnapshot.compareAndSet(null, snapshot))
+            operationAtGate.set(snapshot.operation)
+        } else {
+            check(firstAborted.get() && secondGateEntered.compareAndSet(false, true))
+            check(snapshot == firstSnapshot.get() && snapshot.operation == operationAtGate.get())
+        }
+        val gate = newId()
+        owned.gateNonce = gate
+        val committedAt = Instant.now()
+        val deadline = System.nanoTime() + Duration.ofSeconds(15).toNanos()
+        mark(E2eHostPhase.CLOSE_RELEASE)
+        publish("attempt-${owned.attempt}-close-committed.json", buildJsonObject {
+            put("schemaVersion", 1); put("runNonce", runNonce); put("attempt", owned.attempt)
+            put("attemptNonce", attemptNonces[owned.attempt - 1]); put("gateNonce", gate)
+            put("closeOperationId", snapshot.operation); put("hostCommittedAt", timestamp(committedAt))
+            put("releaseDeadlineAt", timestamp(committedAt.plusSeconds(15)))
+        })
+        // Client cancellation must not remove either deadline. The timeouts are INSIDE NC.
+        withContext(NonCancellable) {
+            if (owned.attempt == 1) {
+                val future = withTimeout(remainingMillis(deadline)) {
+                    while (!exists("attempt-1-close-abandon.json")) {
+                        abortCheck(); check(System.nanoTime() < deadline); delay(10)
+                    }
+                    abortCheck()
+                    val abandon = read("attempt-1-close-abandon.json", abandonKeys)
+                    checkScenario(abandon); checkAttempt(abandon, 1)
+                    check(abandon.identifier("gateNonce") == gate && abandon.identifier("closeOperationId") == snapshot.operation)
+                    check(abandon.text("action") == "ABANDON")
+                    listOf("serviceGoneObserved", "notificationGoneObserved", "cancelProofVerified").forEach(abandon::yes)
+                    // Notification absence is an actual Android active-notification assertion,
+                    // validated by CI; only Service absence has an independent OS observation.
+                    val proof = read("cancel-observed.json", cancellationKeys)
+                    validateCancellation(proof, owned, gate)
+                    check(cancelProof.compareAndSet(null, proof))
+                    check(System.nanoTime() < deadline && !owned.root.response.isCommitted)
+                    owned.completionDeadline = System.nanoTime() + Duration.ofSeconds(5).toNanos()
+                    check(owned.abandoned.compareAndSet(false, true))
+                    owned.root.response.cancel()
+                    owned.root.responseWriteJob.cancel() // OWN write job, never the handler/server/host job.
+                    owned.root.context.channel().close().also { check(System.nanoTime() < deadline) }
+                }
+                // ONE combined five-second budget also covers external handler completion.
+                withTimeout(remainingMillis(owned.completionDeadline)) { awaitOwnClose(future) }
+                check(!owned.root.context.channel().isOpen)
+                owned.channelClosed.set(true)
+                // Caller finishes its SAME current send context after this returns. No response Engine phase runs.
+            } else {
+                withTimeout(remainingMillis(deadline)) {
+                    while (!exists("attempt-2-close-release.json")) {
+                        abortCheck(); check(System.nanoTime() < deadline); delay(10)
+                    }
+                    abortCheck()
+                    val release = read("attempt-2-close-release.json", releaseKeys + setOf("attempt", "attemptNonce"))
+                    checkAttempt(release, 2)
+                    check(release.identifier("gateNonce") == gate && release.identifier("closeOperationId") == snapshot.operation)
+                    check(release.number("servicePid") in 1..Int.MAX_VALUE.toLong() && release.number("serviceActiveSince") > 0)
+                    check(release.number("serviceActiveSince") != cancelProof.get().number("serviceActiveSince"))
+                    listOf("serviceForeground", "dataSyncObserved", "notificationObserved", "workerQuiescent", "workerReservationVerified").forEach(release::yes)
+                    check(System.nanoTime() < deadline && interruptedSnapshot() == firstSnapshot.get())
+                    secondGateReleased.set(true); barrierReleased.set(true)
+                }
+            }
+        }
+    }
+
+    private fun remainingMillis(deadline: Long): Long {
+        val remaining = deadline - System.nanoTime()
+        check(remaining > 0)
+        return maxOf(1L, remaining / 1_000_000L)
+    }
+    private suspend fun awaitOwnClose(future: ChannelFuture) = suspendCancellableCoroutine<Unit> { continuation ->
+        future.addListener { result ->
+            if (result.isSuccess) continuation.resume(Unit)
+            else continuation.resumeWithException(IllegalStateException("Owned channel close failed"))
+        }
+        // Timeout never closes/cancels other channels or the server. Outer cleanup owns the server.
+    }
+
+    // Called ONLY by the independent host main coroutine, never by the request being observed.
+    private fun completeAbandonedFirst() {
+        val owned = firstCall.get() ?: return
+        if (!owned.abandoned.get() || firstAborted.get()) return
+        check(System.nanoTime() < owned.completionDeadline)
+        if (!owned.channelClosed.get() || !owned.completed.get()) return
+        mark(E2eHostPhase.CLOSE_SQL)
+        check(owned.handler.isCompleted && !owned.root.context.channel().isOpen && !owned.root.response.isCommitted)
+        check(interruptedSnapshot() == firstSnapshot.get())
+        check(System.nanoTime() < owned.completionDeadline)
+        check(firstAborted.compareAndSet(false, true))
+        publish("first-response-aborted.json", buildJsonObject {
+            put("schemaVersion", 1); put("scenario", interruptedScenario); put("runNonce", runNonce)
+            put("attempt", 1); put("attemptNonce", attemptNonces[0]); put("gateNonce", owned.gateNonce!!)
+            put("closeOperationId", operationAtGate.get()); put("responseUncommitted", true); put("channelClosed", true)
+            put("handlerCompleted", true); put("receiptUnchanged", true)
+        })
+    }
+
+    private fun verifyInterruptedFinal(result: JsonObject) {
+        mark(E2eHostPhase.RESULT_CONTROL)
+        checkScenario(result)
+        interruptedResultFlags.forEach(result::yes)
+        check(firstAborted.get() && closeRequests.get() == 2 && secondGateReleased.get())
+        val evidence = result.getValue("cancelEvidence").jsonObject
+        check(evidence.keys == cancellationEvidenceKeys)
+        val proof = cancelProof.get() ?: error("Missing cancellation proof")
+        check(evidence == JsonObject(proof.filterKeys { it in cancellationEvidenceKeys }))
+        val identity = evidence.getValue("frozenIdentity").jsonObject
+        check(identity.keys == identityKeys)
+        identityKeys.forEach { check(result.getValue(it) == identity.getValue(it)) }
+        check(interruptedSnapshot() == firstSnapshot.get())
     }
 
     private fun verify(result: JsonObject) {
@@ -429,7 +737,7 @@ private class ServiceE2eFixture : AutoCloseable {
         }
         storage?.root?.let { directory -> clean(E2eHostPhase.CLEANUP_STORAGE) { Files.walk(directory).use { files -> files.sorted(Comparator.reverseOrder()).forEach(Files::delete) } } }
         root?.let { directory ->
-            privateFiles.forEach { name -> clean(E2eHostPhase.CLEANUP_CONTROL) { Files.deleteIfExists(directory.resolve(name)) } }
+            (if (interrupted) interruptedPrivateFiles else privateFiles).forEach { name -> clean(E2eHostPhase.CLEANUP_CONTROL) { Files.deleteIfExists(directory.resolve(name)) } }
         }
         check(!cleanupFailed)
     }
