@@ -27,8 +27,19 @@ STATUS_LABELS = {'-1': 'ERROR', '-2': 'FAILURE', '-3': 'IGNORED', '-4': 'ASSUMPT
 UNKNOWN_DIAGNOSTIC = 'method=UNKNOWN status=UNKNOWN'
 TEST_DIAGNOSTIC = UNKNOWN_DIAGNOSTIC
 ASSERTION_TYPES = ('TIMEOUT', 'ASSERTION', 'SECURITY', 'STATE', 'OTHER')
-TEST_LINE_LIMIT = 361  # Exact reviewed Android V1 sanitizer bound, not wrapper stack line.
+TEST_LINE_LIMIT = 397  # Exact reviewed Android V1 sanitizer bound, not wrapper stack line.
 ASSERTION_DIAGNOSTIC = ('UNKNOWN', ())
+DENY_DIAGNOSTIC = None
+DENY_OBSERVATIONS = frozenset({
+    ('NO_FOCUSED_ROOT', 'UNKNOWN', 'UNKNOWN', 'UNKNOWN', 'UNKNOWN'),
+    ('OTHER_PACKAGE', 'UNKNOWN', 'UNKNOWN', 'UNKNOWN', 'UNKNOWN'),
+    ('NO_ID_MATCH', 'ZERO', 'UNKNOWN', 'UNKNOWN', 'UNKNOWN'),
+    ('NON_ACTIONABLE', 'MANY', 'UNKNOWN', 'UNKNOWN', 'UNKNOWN'),
+    ('NON_ACTIONABLE', 'ONE', 'FALSE', 'UNKNOWN', 'UNKNOWN'),
+    ('NON_ACTIONABLE', 'ONE', 'TRUE', 'FALSE', 'UNKNOWN'),
+    ('NON_ACTIONABLE', 'ONE', 'TRUE', 'TRUE', 'FALSE'),
+    ('UNKNOWN', 'UNKNOWN', 'UNKNOWN', 'UNKNOWN', 'UNKNOWN'),
+})
 SAFE_DIAGNOSTICS = {UNKNOWN_DIAGNOSTIC} | {
     'method=' + method + ' status=' + status
     for method in METHOD_LABELS.values() for status in STATUS_LABELS.values()}
@@ -80,12 +91,35 @@ def sanitized_assertion(lines):
     return (headers[lines[0]], tuple(numbers))
 
 
+def sanitized_failure(lines, method, code):
+    # Optional DENY-only TIMEOUT suffix is a closed eight-tuple projection of the
+    # producer's last completed existing poll, not a new UI observation by this host.
+    unknown = (('UNKNOWN', ()), None)
+    if type(lines) is not list or not lines or type(lines[0]) is not str:
+        return unknown
+    prefix = 'java.lang.AssertionError: PERMISSION_UI_FAILED_V1_TYPE_TIMEOUT'
+    headers = {prefix + '_DENYOBS_V1_BRANCH_' + branch + '_MATCH_' + match +
+               '_VISIBLE_' + visible + '_ENABLED_' + enabled + '_CLICKABLE_' + clickable:
+               (branch, match, visible, enabled, clickable)
+               for branch, match, visible, enabled, clickable in DENY_OBSERVATIONS}
+    if lines[0] in headers:
+        if method != METHODS[1] or code not in ('-1', '-2'):
+            return unknown
+        assertion = sanitized_assertion([prefix] + lines[1:])
+        if assertion[0] != 'TIMEOUT':
+            return unknown
+        return (assertion, headers[lines[0]])
+    # Unknown/invalid suffixes cannot fall back to accepting just their prefix.
+    return (sanitized_assertion(lines), None)
+
+
 def failed_test_diagnostic(code, fields, packets, stack_lines):
     # Failure-only: bound status identity, then exact closed Android V1 metadata.
     # Bind a known failing identity to its immediately preceding validated START.
-    global TEST_DIAGNOSTIC, ASSERTION_DIAGNOSTIC
+    global TEST_DIAGNOSTIC, ASSERTION_DIAGNOSTIC, DENY_DIAGNOSTIC
     TEST_DIAGNOSTIC = UNKNOWN_DIAGNOSTIC
     ASSERTION_DIAGNOSTIC = ('UNKNOWN', ())
+    DENY_DIAGNOSTIC = None
     identity = {key: fields.get(key) for key in ('class', 'test', 'current', 'numtests')}
     if (code in STATUS_LABELS and len(packets) in (1, 3) and
             packets[-1][0] == '1' and packets[-1][1] == identity and
@@ -93,7 +127,7 @@ def failed_test_diagnostic(code, fields, packets, stack_lines):
             identity['numtests'] == '2' and identity['current'] == str((len(packets) + 1) // 2)):
         TEST_DIAGNOSTIC = ('method=' + METHOD_LABELS[identity['test']] +
                            ' status=' + STATUS_LABELS[code])
-        ASSERTION_DIAGNOSTIC = sanitized_assertion(stack_lines)
+        ASSERTION_DIAGNOSTIC, DENY_DIAGNOSTIC = sanitized_failure(stack_lines, identity['test'], code)
 
 
 def capture(args, seconds=10):
@@ -139,10 +173,11 @@ def parse_runner(raw, error=b'', returncode=0):
     IGNORED=-3, ASSUMPTION_FAILURE=-4. Final CODE -1 is Activity.RESULT_OK,
     distinct from a testcase STATUS_CODE -1, which is always an error.
     """
-    global STAGE, TEST_DIAGNOSTIC, ASSERTION_DIAGNOSTIC
+    global STAGE, TEST_DIAGNOSTIC, ASSERTION_DIAGNOSTIC, DENY_DIAGNOSTIC
     STAGE = 'runner-status-grammar'
     TEST_DIAGNOSTIC = UNKNOWN_DIAGNOSTIC
     ASSERTION_DIAGNOSTIC = ('UNKNOWN', ())
+    DENY_DIAGNOSTIC = None
     require(type(raw) is bytes and type(error) is bytes)
     runner_check(len(raw) <= CAP, 'runner-capture-stdout-cap')
     runner_check(len(error) <= CAP, 'runner-capture-stderr-cap')
@@ -316,6 +351,14 @@ def main():
             line_labels = ','.join(str(n) for n in numbers) if valid and numbers else 'UNKNOWN'
             print('::error::Permission UI sanitized assertion: type=' + label +
                   ' testLines=' + line_labels, flush=True)
+            if (valid and kind == 'TIMEOUT' and
+                    safe in {'method=' + METHODS[1] + ' status=' + STATUS_LABELS[code]
+                             for code in ('-1', '-2')} and
+                    type(DENY_DIAGNOSTIC) is tuple and DENY_DIAGNOSTIC in DENY_OBSERVATIONS):
+                branch, match, visible, enabled, clickable = DENY_DIAGNOSTIC
+                print('::error::Permission UI DENY observation: branch=' + branch +
+                      ' match=' + match + ' visible=' + visible +
+                      ' enabled=' + enabled + ' clickable=' + clickable, flush=True)
         return 1
 
 

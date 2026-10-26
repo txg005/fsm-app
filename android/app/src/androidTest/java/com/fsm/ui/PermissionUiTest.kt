@@ -58,6 +58,18 @@ class PermissionUiTest {
             try { base.evaluate() } catch(failure:Throwable) { throw safeFailure(failure) }
         }
     }}
+    private enum class DenyBranch { NO_FOCUSED_ROOT, OTHER_PACKAGE, NO_ID_MATCH, NON_ACTIONABLE, UNKNOWN }
+    private enum class MatchBucket { ZERO, ONE, MANY, UNKNOWN }
+    private enum class ObservedFlag { TRUE, FALSE, UNKNOWN }
+    /** Last COMPLETED poll only, never a history or a claim of continuously stable UI. */
+    private data class DenyObservation(val branch:DenyBranch=DenyBranch.UNKNOWN,
+        val match:MatchBucket=MatchBucket.UNKNOWN,val visible:ObservedFlag=ObservedFlag.UNKNOWN,
+        val enabled:ObservedFlag=ObservedFlag.UNKNOWN,val clickable:ObservedFlag=ObservedFlag.UNKNOWN) {
+        fun suffix()="_DENYOBS_V1_BRANCH_${branch.name}_MATCH_${match.name}_VISIBLE_${visible.name}_ENABLED_${enabled.name}_CLICKABLE_${clickable.name}"
+    }
+    private var denyTimeoutOwner:Throwable?=null
+    private var denyTimeoutObservation:DenyObservation?=null
+    private fun observed(value:Boolean)=if(value) ObservedFlag.TRUE else ObservedFlag.FALSE
     // V1 diagnostic: closed type only; NEVER copy message, cause, suppressed, class or method.
     private fun safeFailure(original:Throwable):AssertionError {
         val kind=when(original) {
@@ -72,13 +84,15 @@ class PermissionUiTest {
                 (it.className=="com.fsm.ui.PermissionUiTest" || it.className.startsWith("com.fsm.ui.PermissionUiTest\$")) &&
                 it.lineNumber in 1..SOURCE_LINE_LIMIT
         }.map { it.lineNumber }.distinct().take(3).toList()
-        return AssertionError("PERMISSION_UI_FAILED_V1_TYPE_$kind").also { safe ->
+        val observation=if(kind=="TIMEOUT" && original===denyTimeoutOwner) denyTimeoutObservation else null
+        return AssertionError("PERMISSION_UI_FAILED_V1_TYPE_$kind"+(observation?.suffix() ?: "")).also { safe ->
             safe.stackTrace=lines.map {
                 StackTraceElement("com.fsm.ui.PermissionUiTest","checkpoint","PermissionUiTest.kt",it)
             }.toTypedArray()
+            denyTimeoutOwner=null; denyTimeoutObservation=null
         }
     }
-    private val SOURCE_LINE_LIMIT=361
+    private val SOURCE_LINE_LIMIT=397
     @get:Rule val rules:RuleChain=RuleChain.outerRule(sanitized).around(compose)
     private val instrumentation=InstrumentationRegistry.getInstrumentation()
     private val app get()=instrumentation.targetContext.applicationContext as FsmApp
@@ -118,6 +132,7 @@ class PermissionUiTest {
         .none { it.service.packageName==app.packageName && it.service.className==SyncService::class.java.name }
 
     private fun runCase(body:()->Unit) {
+        denyTimeoutOwner=null; denyTimeoutObservation=null
         deadline=SystemClock.elapsedRealtime()+90000
         var primary:Throwable?=null
         try {
@@ -236,20 +251,41 @@ class PermissionUiTest {
         } finally { windows.forEach { it.recycle() } }
     }
     private fun clickOrdinaryDeny(packageName:String,transitionDeadline:Long) {
+        denyTimeoutOwner=null; denyTimeoutObservation=null
+        var last=DenyObservation()
         val budget=transitionDeadline-SystemClock.elapsedRealtime(); check(budget>0)
-        compose.waitUntil(budget) {
-            check(SystemClock.elapsedRealtime()<transitionDeadline); val windows=automation.windows
-            try {
-                val focused=windows.filter { it.isFocused && it.isActive }; check(focused.size<=1)
-                val root=focused.singleOrNull()?.root ?: return@waitUntil false
-                try { if(root.packageName?.toString()!=packageName) return@waitUntil false
-                    val nodes=root.findAccessibilityNodeInfosByViewId("$packageName:id/permission_deny_button")
+        try {
+            compose.waitUntil(budget) {
+                check(SystemClock.elapsedRealtime()<transitionDeadline); val windows=automation.windows
+                try {
+                    val focused=windows.filter { it.isFocused && it.isActive }; check(focused.size<=1)
+                    val root=focused.singleOrNull()?.root
+                    if(root==null) { last=DenyObservation(DenyBranch.NO_FOCUSED_ROOT); return@waitUntil false }
                     try {
-                        val visible=nodes.filter { it.isVisibleToUser && it.isEnabled && it.isClickable }; check(visible.size<=1)
-                        if(visible.isEmpty()) false else { check(SystemClock.elapsedRealtime()<transitionDeadline); check(visible.single().performAction(AccessibilityNodeInfo.ACTION_CLICK)); check(SystemClock.elapsedRealtime()<transitionDeadline); true }
-                    } finally { nodes.forEach { it.recycle() } }
-                } finally { root.recycle() }
-            } finally { windows.forEach { it.recycle() } }
+                        if(root.packageName?.toString()!=packageName) { last=DenyObservation(DenyBranch.OTHER_PACKAGE); return@waitUntil false }
+                        val nodes=root.findAccessibilityNodeInfosByViewId("$packageName:id/permission_deny_button")
+                        try {
+                            var v=ObservedFlag.UNKNOWN; var e=ObservedFlag.UNKNOWN; var c=ObservedFlag.UNKNOWN
+                            // Capture ONLY getters the existing short-circuit filter already reads.
+                            // With multiple matches no arbitrary node represents the whole lookup.
+                            val visible=nodes.filter { node ->
+                                node.isVisibleToUser.also { if(nodes.size==1) v=observed(it) } &&
+                                    node.isEnabled.also { if(nodes.size==1) e=observed(it) } &&
+                                    node.isClickable.also { if(nodes.size==1) c=observed(it) }
+                            }; check(visible.size<=1)
+                            if(visible.isEmpty()) {
+                                last=if(nodes.isEmpty()) DenyObservation(DenyBranch.NO_ID_MATCH,MatchBucket.ZERO)
+                                    else DenyObservation(DenyBranch.NON_ACTIONABLE,if(nodes.size==1) MatchBucket.ONE else MatchBucket.MANY,v,e,c)
+                                false
+                            } else { check(SystemClock.elapsedRealtime()<transitionDeadline); check(visible.single().performAction(AccessibilityNodeInfo.ACTION_CLICK)); check(SystemClock.elapsedRealtime()<transitionDeadline); true }
+                        } finally { nodes.forEach { it.recycle() } }
+                    } finally { root.recycle() }
+                } finally { windows.forEach { it.recycle() } }
+            }
+        } catch(timeout:ComposeTimeoutException) {
+            // Bind to THIS wait and THIS Throwable; picker/cleanup timeouts cannot inherit it.
+            denyTimeoutOwner=timeout; denyTimeoutObservation=last
+            throw timeout
         }
     }
     private fun sameResumedWindow(expectedActivity:MainActivity,expectedModel:FsmModel):Boolean {
