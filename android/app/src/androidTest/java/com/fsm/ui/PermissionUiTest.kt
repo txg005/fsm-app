@@ -235,22 +235,22 @@ class PermissionUiTest {
             }
         } finally { windows.forEach { it.recycle() } }
     }
-    private fun clickOrdinaryDeny(packageName:String) {
-        val windows=automation.windows
-        try {
-            val focused=windows.filter { it.isFocused && it.isActive }
-            check(focused.size==1)
-            val root=requireNotNull(focused.single().root)
+    private fun clickOrdinaryDeny(packageName:String,transitionDeadline:Long) {
+        val budget=transitionDeadline-SystemClock.elapsedRealtime(); check(budget>0)
+        compose.waitUntil(budget) {
+            check(SystemClock.elapsedRealtime()<transitionDeadline); val windows=automation.windows
             try {
-                check(root.packageName?.toString()==packageName)
-                val nodes=root.findAccessibilityNodeInfosByViewId("$packageName:id/permission_deny_button")
-                try {
-                    val visible=nodes.filter { it.isVisibleToUser && it.isEnabled && it.isClickable }
-                    check(visible.size==1)
-                    check(visible.single().performAction(AccessibilityNodeInfo.ACTION_CLICK))
-                } finally { nodes.forEach { it.recycle() } }
-            } finally { root.recycle() }
-        } finally { windows.forEach { it.recycle() } }
+                val focused=windows.filter { it.isFocused && it.isActive }; check(focused.size<=1)
+                val root=focused.singleOrNull()?.root ?: return@waitUntil false
+                try { if(root.packageName?.toString()!=packageName) return@waitUntil false
+                    val nodes=root.findAccessibilityNodeInfosByViewId("$packageName:id/permission_deny_button")
+                    try {
+                        val visible=nodes.filter { it.isVisibleToUser && it.isEnabled && it.isClickable }; check(visible.size<=1)
+                        if(visible.isEmpty()) false else { check(SystemClock.elapsedRealtime()<transitionDeadline); check(visible.single().performAction(AccessibilityNodeInfo.ACTION_CLICK)); check(SystemClock.elapsedRealtime()<transitionDeadline); true }
+                    } finally { nodes.forEach { it.recycle() } }
+                } finally { root.recycle() }
+            } finally { windows.forEach { it.recycle() } }
+        }
     }
     private fun sameResumedWindow(expectedActivity:MainActivity,expectedModel:FsmModel):Boolean {
         var ready=false
@@ -273,10 +273,10 @@ class PermissionUiTest {
             Intent("android.content.pm.action.REQUEST_PERMISSIONS"),PackageManager.MATCH_DEFAULT_ONLY)).activityInfo
         check(controllerActivity.applicationInfo.flags and (ApplicationInfo.FLAG_SYSTEM or ApplicationInfo.FLAG_UPDATED_SYSTEM_APP)!=0)
         val controller=controllerActivity.packageName
+        val denyDeadline=SystemClock.elapsedRealtime()+remaining()
         compose.onNodeWithText("Сохранить закрытие и поставить в очередь").performScrollTo().performClick()
-        waitFor { focusedSystemWindow(controller) }
         // Real ordinary deny, not revoke/grant, don't-ask-again, a seeded result, or direct callback.
-        clickOrdinaryDeny(controller)
+        clickOrdinaryDeny(controller,denyDeadline)
         waitFor { denied() && model.route=="detail" && !model.busy && !model.saving && model.results.single().lifecycle=="QUEUED" }
         idle()
         compose.onNodeWithText("Результат: Закрытие сохранено на устройстве; ожидает подтверждения сервера").assertExists()
