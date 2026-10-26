@@ -33,7 +33,9 @@ STAGES = ('prepare', 'hostenv', 'compile', 'postgres', 'device', 'preflight', 'i
           'fixture-directory', 'publish-payload', 'publish-ready', 'publish-verify',
           'host-proof-wait', 'host-proof-exit', 'host-proof-output',
           'host-proof-proof-read', 'host-proof-schema', 'host-proof-ready-match',
-          'host-proof-result-match', 'host-proof-control-clean', 'host-proof-artifact')
+          'host-proof-result-match', 'host-proof-control-clean', 'host-proof-artifact',
+          'cancel-proof', 'cancel-os-gone', 'abandon', 'first-aborted',
+          'second-initial', 'second-close')
 HOST_FAILURES = frozenset(('STARTUP CLOSE_SQL CLOSE_RELEASE RESULT_CONTROL RESULT_SQL PHOTO_SQL '
                            'RECEIPTS_SQL RECEIPT_HASH BLOB OWN_AUTH OWN_JPEG OWN_HEADERS '
                            'FOREIGN_AUTH FOREIGN_404 CLEANUP_NETTY CLEANUP_DATABASE '
@@ -178,7 +180,7 @@ def publish(path, obj):
         os.unlink(name)
 
 
-def publish_artifacts(ready, result, proof, nonce):
+def publish_artifacts(ready, result, proof, nonce, interrupted=False):
     # Lexical checkout binding, NOT resolve-and-adopt of an existing symlink tree.
     repo = Path(os.path.abspath(__file__)).parents[2]
     require(repo == Path.cwd() and repo.resolve() == repo)
@@ -191,8 +193,8 @@ def publish_artifacts(ready, result, proof, nonce):
         require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & 0o022)
     objects = (('ready', ready), ('result', result), ('hostproof', proof))
     for name, obj in objects:
-        validate(name, obj, nonce)
-    output = parent / 'service-e2e'
+        (validate_interrupted if interrupted else validate)(name, obj, nonce)
+    output = parent / ('service-interrupted-e2e' if interrupted else 'service-e2e')
     require(not output.exists() and not output.is_symlink())
     output.mkdir(mode=0o700)  # Exclusive fresh directory; never resume partial output.
     for name, obj in objects:
@@ -290,7 +292,7 @@ def root_path():
     return root
 
 
-def runner_passed(raw):
+def runner_passed(raw, method=METHOD):
     require(len(raw) <= 65536)
     statuses, fields, finals = [], {}, []
     for line in raw.decode('utf-8').splitlines():
@@ -308,7 +310,7 @@ def runner_passed(raw):
     require(not fields and finals == ['-1'] and len(statuses) == 2)
     require([s[0] for s in statuses] == ['1', '0'])
     for _, fields in statuses:
-        require(fields.get('class') == CLASS and fields.get('test') == METHOD)
+        require(fields.get('class') == CLASS and fields.get('test') == method)
         require(fields.get('current') == '1' and fields.get('numtests') == '1')
 
 
@@ -341,6 +343,12 @@ def runtime_service(raw, pid):
 
 class ServiceDevice(Device):
     deadline = None
+    app_root = APPROOT
+    read_names = ('fixture', 'release-service', 'close-committed', 'service-ready', 'close-observed', 'result')
+    write_names = ('fixture', 'release-service', 'close-committed')
+
+    def validate_message(self, name, obj, nonce=None):
+        return validate(name, obj, nonce)
 
     def shell(self, script, seconds=5, input_data=None, cap=262144):
         if self.deadline is not None:
@@ -355,11 +363,10 @@ class ServiceDevice(Device):
         require(b'ServiceRecord{' not in raw)
 
     def app_read(self, name):
-        require(name in ('fixture', 'release-service', 'close-committed',
-                         'service-ready', 'close-observed', 'result'))
-        path = APPROOT + name + '.json'
+        require(name in self.read_names)
+        path = self.app_root + name + '.json'
         ready = path + '.ready'
-        root = APPROOT.rstrip('/')
+        root = self.app_root.rstrip('/')
         # Payload existence alone NEVER commits a message. Missing ready is bounded
         # pending; a present but invalid marker/payload is an immediate failure.
         script = ('[ -d ' + root + ' ] && [ ! -L ' + root + ' ] && '
@@ -379,8 +386,8 @@ class ServiceDevice(Device):
         return None if raw == b'ABSENT' else decode(raw)
 
     def app_write(self, name, obj):
-        require(name in ('fixture', 'release-service', 'close-committed'))
-        validate(name, obj)
+        require(name in self.write_names)
+        self.validate_message(name, obj)
         if name == 'fixture':
             stage('fixture-run-as')
             self.shell('run-as com.fsm sh -c ' + shlex.quote(':'))
@@ -391,9 +398,9 @@ class ServiceDevice(Device):
             self.shell('run-as com.fsm sh -c ' + shlex.quote(parent))
             stage('fixture-directory')
             self.shell('run-as com.fsm sh -c ' + shlex.quote(
-                'umask 077; [ -d files ] && [ ! -L files ] && mkdir ' + APPROOT))
-        root = APPROOT.rstrip('/')
-        path = APPROOT + name + '.json'
+                'umask 077; [ -d files ] && [ ! -L files ] && mkdir ' + self.app_root))
+        root = self.app_root.rstrip('/')
+        path = self.app_root + name + '.json'
         ready = path + '.ready'
         guard = ('[ -d ' + root + ' ] && [ ! -L ' + root + ' ] && '
                  '[ "$(stat -c %a ' + root + ')" = 700 ] && '
@@ -416,7 +423,7 @@ class ServiceDevice(Device):
                   '[ ! -e ' + ready + ' ] && [ ! -L ' + ready + ' ] && : > ' + ready)
         self.shell('run-as com.fsm sh -c ' + shlex.quote(script))
         stage('publish-verify')
-        require(validate(name, self.app_read(name), obj['runNonce']) == obj)
+        require(self.validate_message(name, self.app_read(name), obj['runNonce']) == obj)
 
     def runtime(self, pid):
         return runtime_service(self.shell('dumpsys activity -a services com.fsm'), pid)
@@ -680,6 +687,346 @@ def run():
     print('::notice::Service E2E PASS: target started=1 passed=1 failures=0 errors=0 skips=0; independent initial/close FGS dataSync notification stableRecord=true; Android activeSince assertion=true; backend SQL JPEG proof=true; app DB/photos retained for disposable emulator teardown (not full storage cleanup or coroutine join proof)')
 
 
+# Frozen CANCEL_RETRY_V1: deliberately separate strict schemas; no positive fallback.
+SCENARIO = 'CANCEL_RETRY_V1'
+INTERRUPTED_METHOD = 'visibleStopPreservesUnknownOutcomeAndSameKeyRetryClosesOnce'
+IDENTITY_KEYS = RESULT_IDS + ('jpegSha256 jpegByteSize resultCapturedAt '
+                             'closeFrozenPayloadSha256 closeWireBodySha256').split()
+CANCEL_FLAGS = ('serviceGone notificationGone engineGateExited oldReservationTerminal '
+                'uploadACK closeRetryWait closeUnknownOutcome resultQueued liveUiNotSuccessful').split()
+INTERRUPTED_SCHEMAS = {
+    'ready': SCHEMAS['ready'] + ' scenario',
+    'fixture': SCHEMAS['fixture'] + ' scenario firstAttemptNonce secondAttemptNonce',
+    'result': SCHEMAS['result'] + ' scenario cancelEvidence firstResponseAborted retryBackoffElapsed secondServiceDistinct sameFrozenIdentity',
+    'hostproof': SCHEMAS['hostproof'] + ' scenario cancelUnknownOutcomeVerified firstResponseAborted replayReceiptUnchanged singleBusinessEffect',
+    'cancel-authorized': 'schemaVersion scenario runNonce attempt attemptNonce gateNonce closeOperationId servicePid serviceActiveSince cancelAuthorized',
+    'cancel-observed': 'schemaVersion scenario runNonce attempt attemptNonce gateNonce servicePid serviceActiveSince frozenIdentity closeAttempts retryNotBefore ' + ' '.join(CANCEL_FLAGS),
+    # Literal agreed eleven keys, NOT the obsolete prose count "14".
+    'close-abandon': 'schemaVersion scenario runNonce attempt attemptNonce gateNonce closeOperationId action serviceGoneObserved notificationGoneObserved cancelProofVerified',
+    'first-response-aborted': 'schemaVersion scenario runNonce attempt attemptNonce gateNonce closeOperationId responseUncommitted channelClosed handlerCompleted receiptUnchanged',
+}
+for _phase in ('service-ready', 'release-service', 'close-committed', 'close-observed', 'close-release'):
+    INTERRUPTED_SCHEMAS[_phase] = SCHEMAS[_phase] + ' attempt attemptNonce'
+INTERRUPTED_APP_NAMES = ('fixture', 'result', 'cancel-authorized', 'cancel-observed', 'first-response-aborted') + tuple(
+    'attempt-' + str(attempt) + '-' + phase for attempt in (1, 2)
+    for phase in ('service-ready', 'release-service', 'close-committed', 'close-observed'))
+INTERRUPTED_HOST_NAMES = frozenset(('ready.json fixture.json attempt-1-close-committed.json '
+    'attempt-2-close-committed.json cancel-observed.json attempt-1-close-abandon.json '
+    'first-response-aborted.json attempt-2-close-release.json android-result.json '
+    'outcome.json abort.json result.json hostproof.json').split())
+
+
+def frozen_identity(obj):
+    require(type(obj) is dict and set(obj) == set(IDENTITY_KEYS))
+    for key in RESULT_IDS:
+        identifier(obj[key])
+    require(len({obj[k] for k in RESULT_IDS}) == len(RESULT_IDS))
+    for key in ('jpegSha256', 'closeFrozenPayloadSha256', 'closeWireBodySha256'):
+        require(type(obj[key]) is str and SHA.fullmatch(obj[key]) is not None)
+    require(obj['jpegSha256'] == JPEG)
+    number(obj['jpegByteSize'], 631, 631)
+    instant(obj['resultCapturedAt'])
+    return obj
+
+
+def cancel_evidence(obj):
+    require(type(obj) is dict and set(obj) == {'frozenIdentity', 'closeAttempts', 'retryNotBefore', *CANCEL_FLAGS})
+    frozen_identity(obj['frozenIdentity'])
+    number(obj['closeAttempts'], 1, 1)
+    instant(obj['retryNotBefore'])
+    require(all(obj[k] is True for k in CANCEL_FLAGS))
+    return obj
+
+
+def validate_interrupted(kind, obj, nonce=None):
+    require(kind in INTERRUPTED_SCHEMAS)
+    require(type(obj) is dict and set(obj) == set(INTERRUPTED_SCHEMAS[kind].split()))
+    number(obj['schemaVersion'], 1, 1)
+    identifier(obj['runNonce'])
+    require(nonce is None or obj['runNonce'] == nonce)
+    if 'scenario' in obj:
+        require(obj['scenario'] == SCENARIO)
+    if kind in SCHEMAS:
+        # Positive validators operate on the EXACT counterpart only. Extra mode
+        # fields are independently exact-checked above, never silently accepted.
+        validate(kind, {k: obj[k] for k in SCHEMAS[kind].split()}, nonce)
+    for key in ('firstAttemptNonce', 'secondAttemptNonce', 'attemptNonce', 'gateNonce', 'closeOperationId'):
+        if key in obj:
+            identifier(obj[key])
+    if kind == 'fixture':
+        require(len({obj['runNonce'], obj['firstAttemptNonce'], obj['secondAttemptNonce']}) == 3)
+    if 'attempt' in obj:
+        number(obj['attempt'], 1, 2)
+        require(obj['attemptNonce'] != obj['runNonce'])
+        if 'gateNonce' in obj:
+            require(obj['attemptNonce'] != obj['gateNonce'])
+    for key in ('servicePid', 'serviceActiveSince'):
+        if key in obj:
+            number(obj[key], 1, 2**31-1 if key == 'servicePid' else 2**63-1)
+    if kind in ('cancel-authorized', 'cancel-observed', 'close-abandon', 'first-response-aborted'):
+        number(obj['attempt'], 1, 1)
+    if kind == 'cancel-authorized':
+        require(obj['cancelAuthorized'] is True)
+    elif kind == 'cancel-observed':
+        cancel_evidence({k: obj[k] for k in ('frozenIdentity', 'closeAttempts', 'retryNotBefore', *CANCEL_FLAGS)})
+    elif kind == 'close-abandon':
+        require(obj['action'] == 'ABANDON')
+        require(all(obj[k] is True for k in ('serviceGoneObserved', 'notificationGoneObserved', 'cancelProofVerified')))
+    elif kind == 'first-response-aborted':
+        require(all(obj[k] is True for k in ('responseUncommitted', 'channelClosed', 'handlerCompleted', 'receiptUnchanged')))
+    elif kind == 'result':
+        cancel_evidence(obj['cancelEvidence'])
+        require(obj['cancelEvidence']['frozenIdentity'] == {k: obj[k] for k in IDENTITY_KEYS})
+        require(all(obj[k] is True for k in ('firstResponseAborted', 'retryBackoffElapsed', 'secondServiceDistinct', 'sameFrozenIdentity')))
+    elif kind == 'hostproof':
+        require(all(obj[k] is True for k in ('cancelUnknownOutcomeVerified', 'firstResponseAborted', 'replayReceiptUnchanged', 'singleBusinessEffect')))
+    return obj
+
+
+def attempt_message(kind, obj, nonce, attempt, attempt_nonce):
+    validate_interrupted(kind, obj, nonce)
+    require(obj['attempt'] == attempt and obj['attemptNonce'] == attempt_nonce)
+    return obj
+
+
+class InterruptedDevice(ServiceDevice):
+    app_root = 'files/service-interrupted-e2e-v1/'
+    read_names = INTERRUPTED_APP_NAMES
+    write_names = ('fixture', 'cancel-authorized', 'first-response-aborted') + tuple(
+        'attempt-' + str(attempt) + '-' + phase for attempt in (1, 2)
+        for phase in ('release-service', 'close-committed'))
+
+    def validate_message(self, name, obj, nonce=None):
+        require(name in self.read_names)
+        match = re.fullmatch(r'attempt-([12])-(service-ready|release-service|close-committed|close-observed)', name)
+        if match:
+            validate_interrupted(match[2], obj, nonce)
+            number(obj['attempt'], int(match[1]), int(match[1]))
+            return obj
+        return validate_interrupted(name, obj, nonce)
+
+    def preflight(self):
+        super().preflight()
+        self.shell('run-as com.fsm sh -c ' + shlex.quote(
+            '[ ! -e files/service-interrupted-e2e-v1 ] && [ ! -L files/service-interrupted-e2e-v1 ]'))
+
+    def service_gone(self):
+        # Notification absence is the validated Android current NotificationManager
+        # assertion, NOT a claimed independent host notification-dump audit.
+        raw = self.shell('dumpsys activity -a services com.fsm')
+        require(b'ServiceRecord{' not in raw)
+
+
+def interrupted_host_files(control):
+    require({p.name for p in control.iterdir()} <= INTERRUPTED_HOST_NAMES)
+
+
+def interrupted_initial(device, control, fixture, attempt, runner, host, first=None):
+    stage('initial' if attempt == 1 else 'second-initial')
+    nonce = fixture['runNonce']
+    attempt_nonce = fixture['firstAttemptNonce' if attempt == 1 else 'secondAttemptNonce']
+    initial = attempt_message('service-ready', wait_app(device, 'attempt-' + str(attempt) + '-service-ready',
+                              30, runner, host), nonce, attempt, attempt_nonce)
+    if first is not None:
+        # Same process is allowed. ActiveSince (Android public API) is the numeric
+        # instance oracle; a ServiceRecord identity hash can be reused.
+        require(initial['serviceActiveSince'] != first['serviceActiveSince'])
+    identity = device.runtime(initial['servicePid'])
+    release = {'schemaVersion': 1, 'runNonce': nonce, 'attempt': attempt, 'attemptNonce': attempt_nonce,
+               'servicePid': initial['servicePid'], 'serviceActiveSince': initial['serviceActiveSince'],
+               'dataSyncObserved': True, 'workerQuiescent': True, 'workerReservationVerified': True}
+    device.app_write('attempt-' + str(attempt) + '-release-service', release)
+    return initial, identity
+
+
+def interrupted_close(device, control, fixture, attempt, initial, identity, runner, host):
+    stage('close' if attempt == 1 else 'second-close')
+    nonce = fixture['runNonce']
+    attempt_nonce = fixture['firstAttemptNonce' if attempt == 1 else 'secondAttemptNonce']
+    commit = attempt_message('close-committed', wait_file(control / ('attempt-' + str(attempt) + '-close-committed.json'),
+                             60, host), nonce, attempt, attempt_nonce)
+    remaining = instant(commit['releaseDeadlineAt']) - time.time()
+    require(0 < remaining <= 20)
+    deadline = time.monotonic() + min(15, remaining)
+    device.deadline = deadline
+    device.app_write('attempt-' + str(attempt) + '-close-committed', commit)
+    observed = attempt_message('close-observed', wait_app(device, 'attempt-' + str(attempt) + '-close-observed',
+                               max(.1, deadline-time.monotonic()-3), runner, host), nonce, attempt, attempt_nonce)
+    for key in ('gateNonce', 'closeOperationId'):
+        require(observed[key] == commit[key])
+    for key in ('servicePid', 'serviceActiveSince'):
+        require(observed[key] == initial[key])
+    require(device.runtime(initial['servicePid']) == identity and time.monotonic() < deadline)
+    interrupted_host_files(control)
+    return commit, observed, deadline
+
+
+def interrupted_cancel(device, control, fixture, initial, commit, deadline, runner, host):
+    nonce, attempt_nonce = fixture['runNonce'], fixture['firstAttemptNonce']
+    authorized = {k: commit[k] for k in ('schemaVersion', 'runNonce', 'attempt', 'attemptNonce', 'gateNonce', 'closeOperationId')}
+    authorized.update(scenario=SCENARIO, servicePid=initial['servicePid'],
+                      serviceActiveSince=initial['serviceActiveSince'], cancelAuthorized=True)
+    device.app_write('cancel-authorized', authorized)
+    stage('cancel-proof')
+    proof = attempt_message('cancel-observed', wait_app(device, 'cancel-observed',
+                            max(.1, deadline-time.monotonic()-1), runner, host), nonce, 1, attempt_nonce)
+    for key in ('gateNonce', 'servicePid', 'serviceActiveSince'):
+        require(proof[key] == authorized[key])
+    require(proof['frozenIdentity']['closeOperationId'] == commit['closeOperationId'])
+    stage('cancel-os-gone')
+    device.service_gone()
+    require(time.monotonic() < deadline)
+    publish(control / 'cancel-observed.json', proof)
+    stage('abandon')
+    abandon = {k: authorized[k] for k in ('schemaVersion', 'scenario', 'runNonce', 'attempt', 'attemptNonce', 'gateNonce', 'closeOperationId')}
+    abandon.update(action='ABANDON', serviceGoneObserved=True,
+                   notificationGoneObserved=True, cancelProofVerified=True)
+    validate_interrupted('close-abandon', abandon, nonce)
+    publish(control / 'attempt-1-close-abandon.json', abandon)
+    # Host owns the exact 15s INIT + ONE5s combined channel/handler completion budget.
+    # Reading a marker never substitutes for its strictly validated completion proof.
+    device.deadline = None
+    stage('first-aborted')
+    aborted = attempt_message('first-response-aborted', wait_file(control / 'first-response-aborted.json',
+                              max(.1, deadline + 5 - time.monotonic()), host), nonce, 1, attempt_nonce)
+    for key in ('gateNonce', 'closeOperationId'):
+        require(aborted[key] == commit[key])
+    device.app_write('first-response-aborted', aborted)
+    return proof
+
+
+
+def run_cancel_retry():
+    stage('hostenv')
+    hosted()
+    root = root_path()
+    host = runner = device = None
+    reverse = False
+    nonce = None
+    completed = False
+    try:
+        stage('device')
+        # APK installation is the only setup install; never reinstall/clear/reset between phases.
+        # Device guards include runner component, so install BEFORE their component check.
+        rows = command(['adb', 'devices']).decode('ascii').strip().splitlines()
+        require(len(rows) == 2 and rows[0] == 'List of devices attached')
+        serial, state = rows[1].split()
+        require(re.fullmatch(r'emulator-[0-9]{4,5}', serial) is not None and state == 'device')
+        require(command(['adb', '-s', serial, 'shell', 'getprop ro.kernel.qemu']).strip() == b'1')
+        require(command(['adb', '-s', serial, 'shell', 'getprop sys.boot_completed']).strip() == b'1')
+        require(command(['adb', '-s', serial, 'shell', 'am get-current-user']).strip() == b'0')
+        stage('install')
+        command(['adb', '-s', serial, 'install', 'android/app/build/outputs/apk/debug/app-debug.apk'], 30)
+        command(['adb', '-s', serial, 'install', 'android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk'], 30)
+        device = InterruptedDevice()
+        require(device.serial == serial)
+        stage('preflight')
+        device.preflight()
+        device.shell('pm grant com.fsm android.permission.POST_NOTIFICATIONS')
+        stage('host-ready')
+        state = decode(read_private(root / 'state.json'))
+        require(set(state) == {'port', 'password'})
+        number(state['port'], 1024, 65535)
+        require(type(state['password']) is str and re.fullmatch(r'[0-9a-f]{64}', state['password']) is not None)
+        cp = read_private(root / 'classpath', 1024*1024).decode('utf-8')
+        require(cp and not any(ord(c) < 32 for c in cp))
+        env = dict(os.environ, TEST_DATABASE_URL=f"jdbc:postgresql://127.0.0.1:{state['port']}/fsm_service_e2e",
+                   TEST_DATABASE_USER='fsm_service_e2e', TEST_DATABASE_PASSWORD=state['password'], FSM_SERVICE_E2E_DISPOSABLE='1')
+        host = Capture(['java', '-Xmx384m', '-XX:MaxMetaspaceSize=192m', '-XX:ActiveProcessorCount=2',
+                        '-Dfsm.serviceE2e.controlRoot=' + str(root / 'control'),
+                        '-Dfsm.serviceE2e.scenario=' + SCENARIO, '-cp', cp, 'fsm.AndroidServiceE2EHost'], 550, env=env)
+        publish(root / 'host-process.json', {'pid': host.proc.pid, 'start': process_start(host.proc.pid)})
+        control = root / 'control'
+        ready = validate_interrupted('ready', wait_file(control / 'ready.json', 60, host))
+        nonce = ready['runNonce']
+        require(abs(time.time() - instant(ready['hostReadyAt'])) <= 5)
+        fixture = validate_interrupted('fixture', wait_file(control / 'fixture.json', 5, host), nonce)
+        stage('reverse')
+        mappings = reverse_rows(command(['adb', '-s', serial, 'reverse', '--list']))
+        require(all(row[1] != 'tcp:18080' for row in mappings))
+        command(['adb', '-s', serial, 'reverse', 'tcp:18080', 'tcp:' + str(ready['hostPort'])])
+        reverse = True
+        actual = reverse_rows(command(['adb', '-s', serial, 'reverse', '--list']))
+        require(sum(row[1:] == ('tcp:18080', 'tcp:' + str(ready['hostPort'])) for row in actual) == 1)
+        stage('clock')
+        before, mono = time.time(), time.monotonic()
+        epoch = device.shell('date +%s').strip()
+        after = time.time()
+        require(time.monotonic() - mono <= 2 and 0 <= after - before <= 2)
+        require(re.fullmatch(rb'[0-9]{10}', epoch) is not None)
+        # Seconds command describes [epoch,epoch+1); bound both ends, not invented millis.
+        require(max(abs(int(epoch) - after), abs(int(epoch) + 1 - before)) <= 5)
+        stage('fixture')
+        device.app_write('fixture', fixture)
+        stage('runner')
+        script = 'am instrument -w -r -e class ' + CLASS + '#' + INTERRUPTED_METHOD + ' -e runNonce ' + nonce + ' ' + COMPONENT
+        runner = Capture(['adb', '-s', serial, 'shell', script], 270, 65536)
+        initial, identity = interrupted_initial(device, control, fixture, 1, runner, host)
+        commit, observed, deadline = interrupted_close(device, control, fixture, 1, initial, identity, runner, host)
+        require(commit['gateNonce'] not in (nonce, fixture['firstAttemptNonce'], fixture['secondAttemptNonce']))
+        cancel = interrupted_cancel(device, control, fixture, initial, commit, deadline, runner, host)
+        # Android itself validates its current clock >= persisted nextAttemptAt before
+        # UI Repeat, reparks a NEW owned Worker UUID, and never claims a forced sleep.
+        second, second_identity = interrupted_initial(device, control, fixture, 2, runner, host, initial)
+        second_commit, second_observed, second_deadline = interrupted_close(
+            device, control, fixture, 2, second, second_identity, runner, host)
+        require(second_commit['closeOperationId'] == commit['closeOperationId'])
+        require(second_commit['gateNonce'] not in (nonce, fixture['firstAttemptNonce'], fixture['secondAttemptNonce'], commit['gateNonce']))
+        release = {k: second_observed[k] for k in SCHEMAS['close-release'].split() if k != 'dataSyncObserved'}
+        release.update(dataSyncObserved=True, attempt=2, attemptNonce=fixture['secondAttemptNonce'])
+        attempt_message('close-release', release, nonce, 2, fixture['secondAttemptNonce'])
+        require(time.monotonic() < second_deadline)
+        publish(control / 'attempt-2-close-release.json', release)
+        device.deadline = None
+        stage('result')
+        runner_passed(runner.finish(), INTERRUPTED_METHOD)
+        result = validate_interrupted('result', device.app_read('result'), nonce)
+        require(result['closeOperationId'] == commit['closeOperationId'])
+        require(result['cancelEvidence'] == {k: cancel[k] for k in ('frozenIdentity', 'closeAttempts', 'retryNotBefore', *CANCEL_FLAGS)})
+        require(instant(ready['hostReadyAt']) - 5 <= instant(result['resultCapturedAt']) <= time.time() + 5)
+        publish(control / 'android-result.json', result)
+        publish(control / 'outcome.json', validate('outcome', {'schemaVersion': 1, 'runNonce': nonce, 'androidExitCode': 0}, nonce))
+        stage('host-proof')
+        host.deadline = min(host.deadline, time.monotonic() + 40)
+        finish_host(host)
+        stage('host-proof-proof-read')
+        proof_data = decode(read_private(control / 'hostproof.json'))
+        stage('host-proof-schema')
+        proof = validate_interrupted('hostproof', proof_data, nonce)
+        stage('host-proof-ready-match')
+        require(validate_interrupted('ready', decode(read_private(control / 'ready.json')), nonce) == ready)
+        stage('host-proof-result-match')
+        require(validate_interrupted('result', decode(read_private(control / 'result.json')), nonce) == result)
+        stage('host-proof-control-clean')
+        require({p.name for p in control.iterdir()} == {'ready.json', 'result.json', 'hostproof.json'})
+        stage('host-proof-artifact')
+        publish_artifacts(ready, result, proof, nonce, interrupted=True)
+        completed = True
+    finally:
+        # Do not abort then claim host waits for Android: backend abort tears server down.
+        # Wait bounded for sanitizer/cleanup first. Close-gate timeout may already kill host.
+        if runner is not None and runner.proc.poll() is None:
+            until = min(runner.deadline, time.monotonic() + 30)
+            while runner.proc.poll() is None and time.monotonic() < until:
+                time.sleep(.1)
+        if not completed and nonce is not None and (root / 'control').is_dir():
+            try:
+                publish(root / 'control' / 'abort.json', validate('abort', {
+                    'schemaVersion': 1, 'runNonce': nonce, 'code': 'ORCHESTRATION_FAILED'}, nonce))
+            except (OSError, ValueError):
+                pass  # still fail; never turn a missing abort sink into success.
+        if runner is not None:
+            runner.close()
+        if host is not None:
+            host.close()
+            (root / 'host-process.json').unlink(missing_ok=True)
+        if reverse:
+            command(['adb', '-s', device.serial, 'reverse', '--remove', 'tcp:18080'])
+        # No host-side deletion of any application DB/photos/account files.
+    require(completed)
+    print('::notice::Service interrupted E2E PASS: target started=1 passed=1 failures=0 errors=0 skips=0; two initial and two close FGS dataSync notification-present OS gates; independent OS Service-gone; notification-gone Android current NotificationManager assertion; first handler completion before retry; persisted eligibility Android assertion; exact two close requests and single-effect SQL proof; Worker reservation is test isolation; app DB/photos retained for disposable teardown, not coroutine join or power-loss proof')
+
+
 def cleanup():
     stage('cleanup')
     hosted()
@@ -692,8 +1039,11 @@ def cleanup():
 
 def main():
     try:
-        require(len(sys.argv) == 2 and sys.argv[1] in ('prepare', 'run', 'cleanup'))
-        {'prepare': prepare, 'run': run, 'cleanup': cleanup}[sys.argv[1]]()
+        entries = {'prepare': prepare, 'run': run, 'cleanup': cleanup,
+                   'prepare-cancel-retry': prepare, 'run-cancel-retry': run_cancel_retry,
+                   'cleanup-cancel-retry': cleanup}
+        require(len(sys.argv) == 2 and sys.argv[1] in entries)
+        entries[sys.argv[1]]()
         return 0
     except Exception:
         # No exception text, argv, output, PID, paths, fixtures or raw manifests.
