@@ -164,7 +164,7 @@ jobs:
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none
           working-directory: android
           script: |
-            sh gradlew --no-daemon --no-parallel --max-workers=1 connectedDebugAndroidTest -Pandroid.injected.androidTest.leaveApksInstalledAfterRun=true -Pandroid.testInstrumentationRunnerArguments.notClass=com.fsm.restart.ProcessRestartTest,com.fsm.servicee2e.ServiceE2ETest --console=plain
+            sh gradlew --no-daemon --no-parallel --max-workers=1 connectedDebugAndroidTest -Pandroid.injected.androidTest.leaveApksInstalledAfterRun=true -Pandroid.testInstrumentationRunnerArguments.notClass=com.fsm.restart.ProcessRestartTest,com.fsm.servicee2e.ServiceE2ETest,com.fsm.ui.PermissionUiTest --console=plain
             bash ../scripts/ci/android_process_restart.sh
       - name: Require all 14 baseline tests executed without skips
         if: ${{ !cancelled() }}
@@ -352,3 +352,76 @@ jobs:
             android/app/build/outputs/service-interrupted-e2e/ready.json
             android/app/build/outputs/service-interrupted-e2e/result.json
             android/app/build/outputs/service-interrupted-e2e/hostproof.json
+
+  permission-ui:
+    name: Android real permission denial and Photo Picker cancellation (API36)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+          cache-dependency-path: |
+            android/**/*.gradle.kts
+            android/gradle.properties
+            android/gradlew
+      - name: Install pinned Android platform and build tools
+        timeout-minutes: 10
+        run: sh scripts/ci/android_sdk.sh
+      - name: Enable and require hosted KVM
+        shell: bash
+        timeout-minutes: 3
+        run: |
+          stage() {
+            local label="$1"
+            shift
+            echo "::notice::KVM preflight: starting $label"
+            if timeout --kill-after=5s 30s "$@"; then
+              echo "::notice::KVM preflight: passed $label"
+            else
+              local code=$?
+              echo "::error::KVM preflight: failed $label (exit $code); hardware acceleration remains required"
+              exit "$code"
+            fi
+          }
+          stage 'character device /dev/kvm exists' test -c /dev/kvm
+          stage 'device mode and ownership' stat -c '%A %U %G %t:%T' /dev/kvm
+          stage 'noninteractive sudo' sudo -n true
+          stage 'install udev rule' sudo -n tee /etc/udev/rules.d/99-kvm4all.rules <<< 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"'
+          stage 'reload udev rules' sudo -n udevadm control --reload-rules
+          stage 'trigger KVM udev event' sudo -n udevadm trigger --name-match=kvm
+          stage 'settle KVM udev event' sudo -n udevadm settle --timeout=20
+          stage 'device mode after settle' stat -c '%A %U %G %t:%T' /dev/kvm
+          stage 'runner read access to /dev/kvm' test -r /dev/kvm
+          stage 'runner write access to /dev/kvm' test -w /dev/kvm
+      - name: Build only Android APKs before fresh permission emulator
+        timeout-minutes: 15
+        working-directory: android
+        run: sh gradlew --no-daemon --no-parallel --max-workers=1 assembleDebug assembleDebugAndroidTest --console=plain
+      - name: Two exact permission UI targets on a fresh no-grant emulator
+        timeout-minutes: 15
+        uses: reactivecircus/android-emulator-runner@1dcd0090116d15e7c562f8db72807de5e036a4ed # v2.34.0
+        with:
+          api-level: 36
+          target: google_apis
+          arch: x86_64
+          cores: 2
+          ram-size: 2048M
+          emulator-boot-timeout: 600
+          disable-linux-hw-accel: false
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none
+          script: python3 scripts/ci/android_permission_ui.py
+      - name: Preserve only strict sanitized permission UI summary
+        if: ${{ success() }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: android-permission-ui-api36
+          retention-days: 7
+          if-no-files-found: error
+          path: android/app/build/outputs/permission-ui/summary.json
