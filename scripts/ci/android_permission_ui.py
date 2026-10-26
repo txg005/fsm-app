@@ -18,6 +18,20 @@ METHODS = ('cancellingSystemPhotoPickerLeavesDraftPhotoAndOutboxUnchanged',
 COMPONENT = 'com.fsm.test/androidx.test.runner.AndroidJUnitRunner'
 CAP = 65536
 STAGES = ('hosted', 'device', 'fresh-install', 'install', 'preflight', 'runner', 'publication')
+RUNNER_STAGES = ('runner-capture-stdout-cap', 'runner-capture-stderr-cap',
+                 'runner-deadline', 'runner-exit', 'runner-status-grammar',
+                 'runner-test-status', 'runner-final')
+STAGES += RUNNER_STAGES
+METHOD_LABELS = {name: name for name in METHODS}
+STATUS_LABELS = {'-1': 'ERROR', '-2': 'FAILURE', '-3': 'IGNORED', '-4': 'ASSUMPTION_FAILURE'}
+UNKNOWN_DIAGNOSTIC = 'method=UNKNOWN status=UNKNOWN'
+TEST_DIAGNOSTIC = UNKNOWN_DIAGNOSTIC
+ASSERTION_TYPES = ('TIMEOUT', 'ASSERTION', 'SECURITY', 'STATE', 'OTHER')
+TEST_LINE_LIMIT = 361  # Exact reviewed Android V1 sanitizer bound, not wrapper stack line.
+ASSERTION_DIAGNOSTIC = ('UNKNOWN', ())
+SAFE_DIAGNOSTICS = {UNKNOWN_DIAGNOSTIC} | {
+    'method=' + method + ' status=' + status
+    for method in METHOD_LABELS.values() for status in STATUS_LABELS.values()}
 STAGE = 'hosted'
 TARGET_DEADLINE = None
 PREFLIGHT_KEYS = ('githubHosted', 'singleEmulator', 'userZero', 'freshInstall',
@@ -31,18 +45,70 @@ def stage(name):
     print('::notice::Permission UI stage: ' + name, flush=True)
 
 
+def runner_check(ok, failure_stage):
+    # Classify only failures, never relax an existing requirement or expose values.
+    global STAGE
+    if not ok and STAGE in ('runner',) + RUNNER_STAGES:
+        require(failure_stage in RUNNER_STAGES)
+        STAGE = failure_stage
+    require(ok)
+
+
+def sanitized_assertion(lines):
+    # Sole allowed Android V1 transport. Never inspect Throwable messages/causes,
+    # arbitrary frame labels or RESULT/stream text for diagnostic evidence.
+    if type(lines) is not list or not lines or not all(type(x) is str for x in lines):
+        return ('UNKNOWN', ())
+    lines = list(lines)
+    while lines and lines[-1] == '':
+        lines.pop()
+    if not lines or len(lines) > 4:
+        return ('UNKNOWN', ())
+    headers = {'java.lang.AssertionError: PERMISSION_UI_FAILED_V1_TYPE_' + kind: kind
+               for kind in ASSERTION_TYPES}
+    if lines[0] not in headers:
+        return ('UNKNOWN', ())
+    numbers = []
+    for frame in lines[1:]:
+        match = re.fullmatch(r'\tat com\.fsm\.ui\.PermissionUiTest\.checkpoint\(PermissionUiTest\.kt:([1-9][0-9]{0,2})\)', frame)
+        if match is None:
+            return ('UNKNOWN', ())
+        number = int(match[1])
+        if number > TEST_LINE_LIMIT or number in numbers:
+            return ('UNKNOWN', ())
+        numbers.append(number)
+    return (headers[lines[0]], tuple(numbers))
+
+
+def failed_test_diagnostic(code, fields, packets, stack_lines):
+    # Failure-only: bound status identity, then exact closed Android V1 metadata.
+    # Bind a known failing identity to its immediately preceding validated START.
+    global TEST_DIAGNOSTIC, ASSERTION_DIAGNOSTIC
+    TEST_DIAGNOSTIC = UNKNOWN_DIAGNOSTIC
+    ASSERTION_DIAGNOSTIC = ('UNKNOWN', ())
+    identity = {key: fields.get(key) for key in ('class', 'test', 'current', 'numtests')}
+    if (code in STATUS_LABELS and len(packets) in (1, 3) and
+            packets[-1][0] == '1' and packets[-1][1] == identity and
+            identity['class'] == CLASS and identity['test'] in METHOD_LABELS and
+            identity['numtests'] == '2' and identity['current'] == str((len(packets) + 1) // 2)):
+        TEST_DIAGNOSTIC = ('method=' + METHOD_LABELS[identity['test']] +
+                           ' status=' + STATUS_LABELS[code])
+        ASSERTION_DIAGNOSTIC = sanitized_assertion(stack_lines)
+
+
 def capture(args, seconds=10):
     """One owned child, private capped streams, monotonic deadline and bounded abort."""
     deadline = time.monotonic() + seconds
     if TARGET_DEADLINE is not None:
         deadline = min(deadline, TARGET_DEADLINE - 20)
-    require(deadline > time.monotonic())
+    runner_check(deadline > time.monotonic(), 'runner-deadline')
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
         child = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=out, stderr=err)
         try:
             while True:
-                require(os.fstat(out.fileno()).st_size <= CAP and os.fstat(err.fileno()).st_size <= CAP)
-                require(time.monotonic() < deadline)
+                runner_check(os.fstat(out.fileno()).st_size <= CAP, 'runner-capture-stdout-cap')
+                runner_check(os.fstat(err.fileno()).st_size <= CAP, 'runner-capture-stderr-cap')
+                runner_check(time.monotonic() < deadline, 'runner-deadline')
                 if child.poll() is not None:
                     break
                 time.sleep(.05)
@@ -73,9 +139,16 @@ def parse_runner(raw, error=b'', returncode=0):
     IGNORED=-3, ASSUMPTION_FAILURE=-4. Final CODE -1 is Activity.RESULT_OK,
     distinct from a testcase STATUS_CODE -1, which is always an error.
     """
-    require(type(raw) is bytes and type(error) is bytes and len(raw) <= CAP and len(error) <= CAP)
-    require(type(returncode) is int and returncode == 0)
+    global STAGE, TEST_DIAGNOSTIC, ASSERTION_DIAGNOSTIC
+    STAGE = 'runner-status-grammar'
+    TEST_DIAGNOSTIC = UNKNOWN_DIAGNOSTIC
+    ASSERTION_DIAGNOSTIC = ('UNKNOWN', ())
+    require(type(raw) is bytes and type(error) is bytes)
+    runner_check(len(raw) <= CAP, 'runner-capture-stdout-cap')
+    runner_check(len(error) <= CAP, 'runner-capture-stderr-cap')
+    runner_check(type(returncode) is int and returncode == 0, 'runner-exit')
     packets, fields, finals = [], {}, []
+    stack_lines, stack_active = [], False
     result_started = False
     failure_markers = ('INSTRUMENTATION_FAILED', 'INSTRUMENTATION_ABORTED',
                        'INSTRUMENTATION_RESULT: shortMsg=', 'INSTRUMENTATION_RESULT: longMsg=')
@@ -88,14 +161,20 @@ def parse_runner(raw, error=b'', returncode=0):
             key, sep, value = line[len('INSTRUMENTATION_STATUS: '):].partition('=')
             require(bool(sep) and bool(key) and key not in fields)
             fields[key] = value
+            stack_active = key == 'stack'
+            if stack_active:
+                stack_lines = [value]
         elif line.startswith('INSTRUMENTATION_STATUS_CODE: '):
             require(not finals and not result_started and len(packets) < 4)
             code = line[len('INSTRUMENTATION_STATUS_CODE: '):]
-            require(code in ('1', '0'))
+            if code not in ('1', '0'):
+                failed_test_diagnostic(code, fields, packets, stack_lines)
+                runner_check(False, 'runner-test-status')
             require(all(k in fields for k in ('class', 'test', 'current', 'numtests')))
             require(fields['class'] == CLASS and fields['test'] in METHODS and fields['numtests'] == '2')
             packets.append((code, {k: fields[k] for k in ('class', 'test', 'current', 'numtests')}))
             fields = {}  # Every packet must carry its own identity. No inheritance.
+            stack_lines, stack_active = [], False
         elif line.startswith('INSTRUMENTATION_RESULT: '):
             # RESULT stream is a tail, never a source of new testcase events. This
             # prevents forged START/PASS lines inside untrusted summary text.
@@ -104,12 +183,15 @@ def parse_runner(raw, error=b'', returncode=0):
             require(bool(sep) and bool(key))
             result_started = True
         elif line.startswith('INSTRUMENTATION_CODE: '):
-            require(not fields and not finals and len(packets) == 4)
+            runner_check(not fields and not finals and len(packets) == 4, 'runner-final')
             finals.append(line[len('INSTRUMENTATION_CODE: '):])
         elif line.startswith(('INSTRUMENTATION_STATUS', 'INSTRUMENTATION_CODE', 'INSTRUMENTATION_RESULT')):
             require(False)  # Malformed control records are not opaque stream text.
+        elif stack_active:
+            stack_lines.append(line)
         # Nonidentity runner fields and opaque stream continuations stay private.
-    require(not fields and finals == ['-1'] and [p[0] for p in packets] == ['1', '0', '1', '0'])
+    runner_check(not fields and finals == ['-1'], 'runner-final')
+    require([p[0] for p in packets] == ['1', '0', '1', '0'])
     cases = []
     for index in (0, 1):
         started, passed = packets[index * 2][1], packets[index * 2 + 1][1]
@@ -222,6 +304,18 @@ def main():
         return 0
     except Exception:
         print('::error::Permission UI failed at fixed stage: ' + STAGE, flush=True)
+        if STAGE == 'runner-test-status':
+            safe = TEST_DIAGNOSTIC if TEST_DIAGNOSTIC in SAFE_DIAGNOSTICS else UNKNOWN_DIAGNOSTIC
+            print('::error::Permission UI test diagnostic: ' + safe, flush=True)
+            kind, numbers = ASSERTION_DIAGNOSTIC
+            valid = (safe != UNKNOWN_DIAGNOSTIC and kind in ASSERTION_TYPES and
+                     type(numbers) is tuple and len(numbers) <= 3 and
+                     all(type(n) is int and 1 <= n <= TEST_LINE_LIMIT for n in numbers) and
+                     len(set(numbers)) == len(numbers))
+            label = kind if valid else 'UNKNOWN'
+            line_labels = ','.join(str(n) for n in numbers) if valid and numbers else 'UNKNOWN'
+            print('::error::Permission UI sanitized assertion: type=' + label +
+                  ' testLines=' + line_labels, flush=True)
         return 1
 
 

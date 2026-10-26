@@ -55,9 +55,30 @@ class PermissionUiTest {
     // Include rule setup/teardown: neither Compose trees nor system UI exceptions go to XML/logs.
     private val sanitized=TestRule { base,_ -> object:Statement() {
         override fun evaluate() {
-            try { base.evaluate() } catch(_:Throwable) { throw AssertionError("PERMISSION_UI_FAILED") }
+            try { base.evaluate() } catch(failure:Throwable) { throw safeFailure(failure) }
         }
     }}
+    // V1 diagnostic: closed type only; NEVER copy message, cause, suppressed, class or method.
+    private fun safeFailure(original:Throwable):AssertionError {
+        val kind=when(original) {
+            is ComposeTimeoutException, is TimeoutCancellationException, is java.util.concurrent.TimeoutException -> "TIMEOUT"
+            is AssertionError -> "ASSERTION"
+            is SecurityException -> "SECURITY"
+            is IllegalStateException -> "STATE"
+            else -> "OTHER"
+        }
+        val lines=original.stackTrace.asSequence().filter {
+            it.fileName=="PermissionUiTest.kt" &&
+                (it.className=="com.fsm.ui.PermissionUiTest" || it.className.startsWith("com.fsm.ui.PermissionUiTest\$")) &&
+                it.lineNumber in 1..SOURCE_LINE_LIMIT
+        }.map { it.lineNumber }.distinct().take(3).toList()
+        return AssertionError("PERMISSION_UI_FAILED_V1_TYPE_$kind").also { safe ->
+            safe.stackTrace=lines.map {
+                StackTraceElement("com.fsm.ui.PermissionUiTest","checkpoint","PermissionUiTest.kt",it)
+            }.toTypedArray()
+        }
+    }
+    private val SOURCE_LINE_LIMIT=361
     @get:Rule val rules:RuleChain=RuleChain.outerRule(sanitized).around(compose)
     private val instrumentation=InstrumentationRegistry.getInstrumentation()
     private val app get()=instrumentation.targetContext.applicationContext as FsmApp
@@ -98,27 +119,37 @@ class PermissionUiTest {
 
     private fun runCase(body:()->Unit) {
         deadline=SystemClock.elapsedRealtime()+90000
+        var primary:Throwable?=null
         try {
             preflight()
             seedAndOpen()
             body()
             check(noService() && model.error==null && !model.busy && !model.saving)
             remaining()
+        } catch(failure:Throwable) {
+            primary=failure
+            throw failure
         } finally {
-            // Separate finite 20s cleanup. Host watchdog is 240s for both cases; abort is not PASS.
-            deadline=SystemClock.elapsedRealtime()+20000
-            try { cleanup() } finally {
-                try {
-                    originalAutomationFlags?.let { flags ->
-                        val info=requireNotNull(automation.serviceInfo)
-                        info.flags=flags
-                        automation.serviceInfo=info
+            try {
+                // Separate finite 20s cleanup. Host watchdog is 240s for both cases; abort is not PASS.
+                deadline=SystemClock.elapsedRealtime()+20000
+                try { cleanup() } finally {
+                    try {
+                        originalAutomationFlags?.let { flags ->
+                            val info=requireNotNull(automation.serviceInfo)
+                            info.flags=flags
+                            automation.serviceInfo=info
+                        }
+                    } finally {
+                        if(ownsGate) { SyncGate.mutex.unlock(gateOwner); ownsGate=false }
                     }
-                } finally {
-                    if(ownsGate) { SyncGate.mutex.unlock(gateOwner); ownsGate=false }
                 }
+                remaining(20000)
+            } catch(cleanupFailure:Throwable) {
+                // Both paths still FAIL. Keep the first body failure if cleanup also fails;
+                // attach neither Throwable as cause/suppressed to the public sanitized error.
+                throw primary ?: cleanupFailure
             }
-            remaining(20000)
         }
     }
 
